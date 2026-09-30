@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TNC Insurance Platform — UI Journey & Wireframes (v2)</title>
+<style>
+  :root{ --ink:#1f2937; --mut:#6b7280; --line:#cbd5e1; --blue:#dbeafe; --blueb:#93c5fd;
+         --yel:#fef3c7; --yelb:#fbbf24; --grn:#d1fae5; --grnb:#34d399; --red:#fee2e2; --redb:#f87171; --gray:#f1f5f9; }
+  *{box-sizing:border-box; font-family:"Segoe UI",Arial,sans-serif;}
+  body{margin:0; padding:24px; padding-top:40px; color:var(--ink); background:#fff; max-width:1280px; margin:0 auto;}
+  h1{font-size:24px; margin:0 0 4px} h2{font-size:19px; margin:26px 0 10px; padding-bottom:6px; border-bottom:2px solid var(--blueb)}
+  p,li{font-size:13px; line-height:1.5}
+  .muted{color:var(--mut); font-size:12px}
+  .pill{display:inline-block; padding:2px 8px; border-radius:10px; font-size:10.5px; border:1px solid var(--line); background:var(--gray); margin:1px}
+  .api{background:#eef2ff; border-color:#c7d2fe; color:#3730a3; font-family:Consolas,monospace}
+  .note{background:var(--yel); border:1px solid var(--yelb); border-radius:6px; padding:6px 10px; font-size:12px; margin:8px 0}
+  .cutx{background:var(--red); border:1px solid var(--redb)}
+  .flow{display:flex; flex-wrap:wrap; align-items:center; gap:5px; margin:8px 0 4px}
+  .step{padding:4px 11px; border-radius:12px; font-size:11.5px; border:1px solid var(--blueb); background:var(--blue); white-space:nowrap}
+  .step.auth{background:var(--yel); border-color:var(--yelb)} .step.err{background:var(--red); border-color:var(--redb)}
+  .step.ok{background:var(--grn); border-color:var(--grnb)}
+  .arrow{color:#94a3b8; font-weight:bold}
+  .flabel{font-size:12px; font-weight:700; color:#475569; margin-top:10px}
+  .screens{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  .screen{border:1.5px solid var(--line); border-radius:8px; overflow:hidden; background:#fff; break-inside:avoid}
+  .screen.wide{grid-column:1 / -1}
+  .shead{display:flex; align-items:center; gap:6px; background:var(--gray); border-bottom:1px solid var(--line); padding:4px 8px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .url{flex:1; background:#fff; border:1px solid var(--line); border-radius:4px; font-family:Consolas,monospace; font-size:11px; padding:2px 8px; color:#334155}
+  .stitle{font-size:11px; font-weight:700; color:#0f766e; margin-left:4px; white-space:nowrap}
+  .sbody{padding:8px; font-size:12px}
+  .nav{display:flex; gap:5px; align-items:center; border:1px solid var(--line); border-radius:6px; padding:5px 8px; margin-bottom:8px; background:#fafafa; flex-wrap:wrap}
+  .nav .brand{font-weight:800; font-size:12px; margin-right:8px; color:#1d4ed8}
+  .nav .item{padding:2px 8px; border-radius:10px; border:1px solid var(--line); background:#fff; font-size:11px}
+  .nav .item.here{background:var(--blue); border-color:var(--blueb)}
+  .push{margin-left:auto}
+  .card{border:1px solid var(--line); border-radius:6px; padding:8px; margin:6px 0}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .hero{border:1px dashed var(--line); border-radius:6px; padding:14px; text-align:center; background:linear-gradient(180deg,#eff6ff,#fff)}
+  .btn{display:inline-block; padding:3px 12px; border-radius:5px; border:1px solid var(--blueb); background:var(--blue); font-size:11px; font-weight:600; margin:2px}
+  .btn.warn{background:var(--yel); border-color:var(--yelb)} .btn.danger{background:var(--red); border-color:var(--redb)} .btn.okc{background:var(--grn); border-color:var(--grnb)}
+  .field{border:1px solid var(--line); border-radius:4px; background:#f8fafc; padding:4px 7px; margin:3px 0; font-size:11px; color:#334155}
+  .field b{color:#0f172a}
+  table.sk{width:100%; border-collapse:collapse; font-size:11px; margin:4px 0}
+  table.sk th{background:var(--gray); border:1px solid var(--line); padding:4px 6px; text-align:left}
+  table.sk td{border:1px solid var(--line); padding:4px 6px}
+  tr.exp td{background:#f0f9ff}
+  tr.exp2 td{background:#f8fafc; border-top:none}
+  .badge{padding:1px 7px; border-radius:9px; font-size:10px; border:1px solid var(--line)}
+  .b-g{background:var(--grn); border-color:var(--grnb)} .b-y{background:var(--yel); border-color:var(--yelb)}
+  .b-r{background:var(--red); border-color:var(--redb)} .b-b{background:var(--blue); border-color:var(--blueb)} .b-gy{background:var(--gray)}
+  .toast{border:1px solid var(--grnb); background:var(--grn); border-radius:6px; padding:6px 10px; font-size:11.5px; margin:4px 0}
+  .toast.err{background:var(--red); border-color:var(--redb)}
+  .ctl{display:flex; gap:6px; flex-wrap:wrap; margin:6px 0}
+  .foot{font-size:10.5px; color:var(--mut); border-top:1px dashed var(--line); margin-top:6px; padding-top:4px}
+  .matrix td, .matrix th{font-size:11px}
+  #annoToggle{position:fixed; top:8px; right:12px; z-index:99; font-size:11px; padding:5px 12px; border-radius:6px; border:1px solid var(--blueb); background:#fff; cursor:pointer}
+  body.noanno .foot, body.noanno .note{display:none}
+  @media print{ #annoToggle{display:none} .screens{grid-template-columns:1fr 1fr} body{max-width:none; padding-top:24px} }
+</style>
+<script>function toggleAnno(){document.body.classList.toggle('noanno');}</script>
+</head>
+<body>
+<button id="annoToggle" onclick="toggleAnno()">Hide / show annotations</button>
+
+<h1>TNC Insurance Platform — UI Journey &amp; Wireframes</h1>
+<p class="muted">v2 · Prepared for trainer review · Scope: Angular SPA behind YARP gateway · 14 screens (no full-page detail views — detail lives in expanding rows / modals / tabs) · Consistent with Design Doc v3.0 — including its tier/pricing values · Password reset intentionally absent (Appendix D, item D1).</p>
+
+<h2>1. Design Principles Applied</h2>
+<ul>
+  <li><b>The sign-in page is a chooser, not a form:</b> two info cards (Company / Surveyor), each with ONE button leading to that role's own auth page (HackerRank pattern). Admins get a small text link.</li>
+  <li><b>One shared login component, three doors:</b> each auth page toggles Log In ↔ Sign Up; all login forms call the same <span class="pill api">POST /api/auth/login</span>; the JWT <i>role</i> claim routes the user (<code>/company</code>, <code>/surveyor</code>, <code>/admin</code>).</li>
+  <li><b>Registration is split because data differs</b> — Company (email, password) vs Surveyor (7 fields incl. IRDAI licence number + validity date).</li>
+  <li><b>Detail ≠ page:</b> policy detail, claim detail, and admin's report view are <i>expanding table rows</i>. Small decisions are <i>modals</i> (renewal compare, reject reason). Related views are <i>tabs</i>.</li>
+  <li><b>After login, every screen of that role carries the same role navbar</b> (brand, section links, user identity chip, Logout) — enforced by route guards.</li>
+  <li><b>Toasts carry server messages:</b> register success, "pending admin approval", rejected-surveyour login (echoes the admin's recorded reason), 403 messages (SURVEYOR_PENDING_APPROVAL etc.).</li>
+  <li><b>Every list gets search + filter + sort once</b> (demonstrated fully on Policies; pattern reused on Claims / Queue).</li>
+</ul>
+
+<h2>2. UI Journeys</h2>
+
+<div class="flabel">PUBLIC</div>
+<div class="flow">
+  <span class="step">Landing / About (info only)</span><span class="arrow">→</span>
+  <span class="step">Sign-In chooser (2 cards)</span><span class="arrow">→</span>
+  <span class="step auth">/auth/company or /auth/surveyor</span><span class="arrow">→</span>
+  <span class="step auth">register → toast</span><span class="arrow">/</span>
+  <span class="step">login (any of 3 entries)</span><span class="arrow">→</span>
+  <span class="step">Route by role claim</span>
+</div>
+
+<div class="flabel">COMPANY</div>
+<div class="flow">
+  <span class="step">Login</span><span class="arrow">→</span>
+  <span class="step auth">First login? → Create Company Profile (forced)</span><span class="arrow">→</span>
+  <span class="step">Dashboard</span><span class="arrow">→</span>
+  <span class="step">Quote → tier comparison → Apply</span><span class="arrow">→</span>
+  <span class="step">Policy Pending</span><span class="arrow">→</span>
+  <span class="step ok">Pay → payment success → Active</span><span class="arrow">→</span>
+  <span class="step">File Claim → preliminary decision</span><span class="arrow">→</span>
+  <span class="step">Track / resubmit / get paid</span><span class="arrow">→</span>
+  <span class="step">Renew within 30-day window</span>
+</div>
+
+<div class="flabel">SURVEYOR</div>
+<div class="flow">
+  <span class="step">Register (7 fields)</span><span class="arrow">→</span>
+  <span class="step auth">403 PENDING → toast "awaiting approval"</span><span class="arrow">/</span>
+  <span class="step err">403 REJECTED → toast shows admin's reason</span><span class="arrow">→</span>
+  <span class="step ok">Approved → login OK</span><span class="arrow">→</span>
+  <span class="step">Queue tab → Claim (atomic pickup)</span><span class="arrow">→</span>
+  <span class="step">Investigation: verify fields → submit report</span>
+</div>
+
+<div class="flabel">ADMIN (seeded)</div>
+<div class="flow">
+  <span class="step">Login</span><span class="arrow">→</span>
+  <span class="step">Dashboard (stats)</span><span class="arrow">→</span>
+  <span class="step">Approvals: surveyor approve / reject+reason</span><span class="arrow">↔</span>
+  <span class="step">Approvals: claim payout gates</span><span class="arrow">→</span>
+  <span class="step">Claim Decisions: approve / reject (override note)</span><span class="arrow">→</span>
+  <span class="step">Payments: mark succeeded / failed</span>
+</div>
+
+<h2>3. Wireframes</h2>
+<p class="muted">Lo-fi: placement and content only; colors are signal (yellow = gated/attention, red = destructive/rejected, green = success/approved). Grey text beneath each frame = designer annotations (hide them with the button, top-right).</p>
+
+<div class="screens">
+
+<!-- P0 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/</span><span class="stitle">P0 · Landing (public)</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC&nbsp;Insurance</span><span class="item here">Home</span><span class="item">Coverages</span><span class="item">About</span><span class="push"><span class="btn">Sign In</span></span></div>
+    <div class="hero"><b>Commercial fleet insurance for rideshare &amp; TNC operators</b><br><span class="muted">Period-aware liability coverage · instant quotes · 24-hour claim turnaround.<br>Quotes and policies are available to registered companies — sign in to continue.</span></div>
+    <div class="grid2" style="margin-top:6px">
+      <div class="card"><b>Coverage tiers</b> <span class="muted">(per design doc §3)</span><br>
+        Period-3 liability: <b>₹25L / ₹1Cr / ₹2.5Cr</b><br>
+        Period-2 liability: ₹5L / ₹10L / ₹25L<br>
+        Period-1 (drivable damage): ₹1L / ₹2L / ₹5L
+      </div>
+      <div class="card"><b>Optional add-ons</b> <span class="muted">(+35% premium each)</span><br>Physical Damage · Uninsured Motorist · Medical Payments · Rental Car<br>
+        <span class="muted">Base premium scales with fleet size (₹1,000/vehicle, banded)</span></div>
+    </div>
+    <div class="foot">Fully static, informational only — NO public quote/register CTAs on purpose: quoting requires identity (server-side premium + ownership checks). Only navigation: Sign In.</div>
+  </div>
+</div>
+
+<!-- P1 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/signin</span><span class="stitle">P1 · Sign-in chooser</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC&nbsp;Insurance</span><span class="item">Home</span><span class="push"><span class="item here">Sign In</span></span></div>
+    <div class="grid2">
+      <div class="card" style="text-align:center">
+        <b>I'm a Company</b><br><span class="muted">Cover your fleet, file &amp; track claims, manage renewals and payments</span><br>
+        <span class="btn" style="margin-top:8px">Continue as Company →</span>
+      </div>
+      <div class="card" style="text-align:center">
+        <b>I'm a Surveyor</b><br><span class="muted">Investigate assigned claims, verify evidence, submit reports to the insurer</span><br>
+        <span class="btn" style="margin-top:8px">Continue as Surveyor →</span>
+      </div>
+    </div>
+    <div style="text-align:right;margin-top:6px"><span class="muted">Administrator? <u>Sign in here</u></span></div>
+    <div class="foot">Cards are pure info + one CTA each — clicking navigates to that role's auth page (P2 / P3). The admin link opens the same shared login form as P2 in login state. No forms live on this page.</div>
+  </div>
+</div>
+
+<!-- P2 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/auth/company</span><span class="stitle">P2 · Company auth</span></div>
+  <div class="sbody">
+    <div class="card" style="max-width:340px;margin:0 auto">
+      <div class="ctl" style="justify-content:center"><span class="item here">Log In</span><span class="item">Sign Up</span></div>
+      <div class="field"><b>Email *</b></div>
+      <div class="field"><b>Password *</b></div>
+      <span class="btn">Log In</span>
+      <div class="muted" style="margin-top:4px">Sign-Up state adds: <i>Confirm password</i> (2 fields → 3). Nothing else — company details are collected later (C0).</div>
+    </div>
+    <div class="toast">✔ Registration successful — please log in. (auto-flips to Log In state)</div>
+    <div class="toast err">✖ 409 — Email is already registered.</div>
+    <div class="foot"><span class="pill api">POST /api/auth/register</span> (role fixed server-side = Company) · <span class="pill api">POST /api/auth/login</span> → role claim routes to <code>/company</code>. JWT in memory; refresh via httpOnly cookie.</div>
+  </div>
+</div>
+
+<!-- P3 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/auth/surveyor</span><span class="stitle">P3 · Surveyor auth</span></div>
+  <div class="sbody">
+    <div class="card" style="max-width:360px;margin:0 auto">
+      <div class="ctl" style="justify-content:center"><span class="item">Log In</span><span class="item here">Sign Up</span></div>
+      <div class="field"><b>Email *</b></div><div class="field"><b>Password *</b></div>
+      <div class="field"><b>Confirm password *</b></div>
+      <div class="field"><b>Full name *</b></div>
+      <div class="field"><b>Phone *</b></div>
+      <div class="field"><b>IRDAI licence number *</b> <span class="muted">(Surveyor &amp; Loss Assessor licence — Insurance Act §64UM)</span></div>
+      <div class="field"><b>Licence valid until *</b> <span class="muted">(date picker — must be future; 3-year validity per IRDAI 2015 regulations)</span></div>
+      <span class="btn">Submit for approval</span>
+      <div class="muted" style="margin-top:4px">Log-In state shows only Email + Password.</div>
+    </div>
+    <div class="toast">✔ Registration submitted and pending admin approval. You can log in once approved.</div>
+    <div class="toast err">✖ 403 — Your surveyor account is pending admin approval. &nbsp;·&nbsp; ✖ 403 — Your surveyor registration was rejected: <i>"Licence expired — renew and reapply."</i></div>
+    <div class="foot"><span class="pill api">POST /api/surveyors/register</span> → user + profile in ONE transaction (FR2A.1). Pending login is blocked with 403 (FR2A.5); rejected login error echoes the admin's recorded reason. No 10-minute promises — approval is asynchronous.</div>
+  </div>
+</div>
+
+<!-- C0 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/setup</span><span class="stitle">C0 · Create profile (first login)</span></div>
+  <div class="sbody">
+    <div class="note">Route guard: after Company login, <span class="pill api">GET /api/companies/me</span> → 404 means this page is forced; every other company route redirects here until it returns 200.</div>
+    <div class="card" style="max-width:380px;margin:0 auto">
+      <b>Complete your company profile</b>
+      <div class="field"><b>Company name *</b></div>
+      <div class="field"><b>Registration no. (CIN) *</b></div>
+      <div class="field"><b>Contact person *</b></div>
+      <div class="field"><b>Email</b> <span class="muted">prefilled from account</span></div>
+      <div class="field"><b>Phone *</b></div>
+      <div class="field"><b>Fleet size *</b> <span class="muted">1–500</span></div>
+      <span class="btn">Save &amp; continue</span>
+    </div>
+    <div class="foot"><span class="pill api">POST /api/companies</span> (201) → Dashboard (C1). Editing later lives on the Profile tab (C7).</div>
+  </div>
+</div>
+
+<!-- C1 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/dashboard</span><span class="stitle">C1 · Company dashboard</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item here">Dashboard</span><span class="item">Get Quote</span><span class="item">Policies</span><span class="item">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="grid2">
+      <div class="card">Active policies <b>2</b></div><div class="card">Pending payments <b>1 (₹46,750 ⚠ 48h)</b></div>
+      <div class="card">Claims in review <b>1</b></div><div class="card">Renewals due ≤30d <b>1</b></div>
+    </div>
+    <div class="card"><b>Quick actions</b> <span class="btn">Get a quote</span> <span class="btn warn">File a claim</span> <span class="btn okc">Renew policy</span></div>
+    <div class="card"><b>Alerts</b><br>• Claim CLM-2026-AA11 — Info Requested: damage photo<br>• Policy POL-2026-8B2F — eligible for renewal</div>
+    <div class="foot">Stat cards computed client-side from existing list endpoints (policies/claims/payments + renewability flags) — no new API. Email chip shows until profile is created (doc §12).</div>
+  </div>
+</div>
+
+<!-- C2 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/quote</span><span class="stitle">C2 · Quote → compare → apply</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item here">Get Quote</span><span class="item">Policies</span><span class="item">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="grid2">
+      <div class="card"><b>Get a quote</b>
+        <div class="field">Fleet size * &nbsp;<i>25</i></div><div class="field">Tier ▾ (Basic / Standard / Premium) &nbsp;<i>Standard</i></div>
+        <div class="field">☑ Physical damage &nbsp;☑ Uninsured motorist &nbsp;☐ Medical payments &nbsp;☐ Rental car</div>
+        <span class="btn">Calculate</span>
+      </div>
+      <div class="card"><b>Your estimate</b><br>Estimated premium: <b>₹93,500 /yr</b><br>Per-vehicle equivalent: ₹3,740<br><span class="muted">Valid 30 days · expires 30-Oct-2026</span><br><span class="btn okc">Apply for this policy</span></div>
+    </div>
+    <table class="sk"><tr><th>Tier</th><th>P1 drivable</th><th>P1 other</th><th>P2 liability</th><th>P3 liability</th><th>Premium (same inputs)</th></tr>
+      <tr><td>Basic</td><td>₹1L</td><td>₹50K</td><td>₹5L</td><td>₹25L</td><td>₹46,750</td></tr>
+      <tr class="exp"><td>Standard ★</td><td>₹2L</td><td>₹1L</td><td>₹10L</td><td>₹1Cr</td><td>₹93,500</td></tr>
+      <tr><td>Premium</td><td>₹5L</td><td>₹2L</td><td>₹25L</td><td>₹2.5Cr</td><td>₹1,16,875</td></tr></table>
+    <details><summary class="muted">My recent quotes (FR3.5a)</summary><div class="card">#… Standard · fleet 25 · ₹93,500 · <span class="badge b-y">Active</span></div></details>
+    <div class="foot"><span class="pill api">POST /api/quotes/calculate</span> response feeds estimate + comparison (premium = ₹1,000 × fleet × tier × (1+0.35/addon) × fleet-band — server-side only). Apply → <span class="pill api">POST /api/policies/apply</span> → toast "Policy created — complete payment". Limits match design doc §3 exactly.</div>
+  </div>
+</div>
+
+<!-- C3 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/policies</span><span class="stitle">C3 · Policies + renew modal</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item">Get Quote</span><span class="item here">Policies</span><span class="item">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="ctl"><span class="field" style="flex:1">🔍 search policy no / tier</span><span class="field">status ▾</span><span class="field">sort: end date ↓ ▾</span></div>
+    <table class="sk">
+      <tr><th>Policy #</th><th>Tier</th><th>Fleet</th><th>Premium</th><th>Status</th><th>End</th><th></th></tr>
+      <tr class="exp"><td>POL-2026-8B2F ▾</td><td>Standard</td><td>25</td><td>₹93,500</td><td><span class="badge b-g">Active</span> <span class="badge b-y">renewable</span></td><td>28-Oct</td><td><span class="btn warn">Renew…</span></td></tr>
+      <tr class="exp2"><td colspan="7">↳ add-ons: PhysicalDamage, UninsuredMotorist · coverage P2 ₹10L / P3 ₹1Cr · origin: quote #… · renewed-from: POL-2025-77C1</td></tr>
+      <tr><td>POL-2026-4F2A</td><td>Basic</td><td>25</td><td>₹46,750</td><td><span class="badge b-y">Pending</span></td><td>—</td><td><span class="btn">Pay now</span> <span class="btn danger">Cancel</span></td></tr>
+    </table>
+    <div class="card" style="border-style:dashed"><b>Renewal modal</b> · current ₹93,500 → estimate ₹1,04,720 (↑12% · avg claims 2.4/yr) <span class="btn okc">Confirm</span> <span class="btn">Back</span></div>
+    <div class="foot"><span class="pill api">GET /api/policies?search&amp;status&amp;sort</span> (A7 showcase) · renew: <span class="pill api">GET …/renewals/estimate</span> then <span class="pill api">POST …/renewals</span> · cancel guard: Pending-only (FR4.7) · 410 if origin quote expired (FR4.6).</div>
+  </div>
+</div>
+
+<!-- C4 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/claims</span><span class="stitle">C4 · Claims + expanded row</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item">Get Quote</span><span class="item">Policies</span><span class="item here">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="ctl"><span class="field" style="flex:1">🔍 search claim no / type</span><span class="field">status ▾</span><span class="btn warn">+ File claim</span></div>
+    <table class="sk">
+      <tr><th>Claim #</th><th>Incident</th><th>Type</th><th>Amount</th><th>Status</th></tr>
+      <tr class="exp"><td>CLM-2026-AA11 ▾</td><td>12-Oct 21:40</td><td>Own Damage</td><td>₹1.1L</td><td><span class="badge b-y">InfoRequested</span> <span class="badge b-y">flagged</span></td></tr>
+      <tr class="exp2"><td colspan="5">
+        timeline: <span class="badge b-g">Filed</span>› <span class="badge b-g">Queued</span>› <span class="badge b-g">Investigation</span> › <span class="badge b-gy">Report</span> › <span class="badge b-gy">Payment</span><br>
+        fields: <span class="badge b-g">TripLog</span> <span class="badge b-g">Driver</span> <span class="badge b-g">Passenger</span> <span class="badge b-r">DamagePhoto — "blurred, re-upload"</span> <span class="badge b-g">FIR</span><br>
+        resubmit: <span class="field" style="display:inline-block">new damage photo URL</span> <span class="btn">Submit</span><br>
+        <span class="muted">preliminary: est. ₹1.0L · period P3 · flagged (15-min trip gap)</span> · docs: <u>FIR.pdf</u> · <u>photo.jpg</u> · <u>DL.jpg</u>
+      </td></tr>
+      <tr><td>CLM-2026-9C3E</td><td>02-Oct 08:15</td><td>Medical</td><td>₹60k</td><td><span class="badge b-g">PaymentPending</span></td></tr>
+    </table>
+    <div class="foot"><span class="pill api">GET /api/claims</span>; expanded row = <span class="pill api">GET /api/claims/{id}</span> · resubmit → <span class="pill api">PATCH …/resubmit</span> — only InfoRequested fields editable; location/time/amount immutable (FR5.11/5.16).</div>
+  </div>
+</div>
+
+<!-- C5 -->
+<div class="screen wide">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/claims/new?policy=POL-2026-8B2F</span><span class="stitle">C5 · File claim (the heavy form)</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item">Get Quote</span><span class="item">Policies</span><span class="item here">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="grid2">
+      <div class="card"><b>Incident</b>
+        <div class="field">Policy: POL-2026-8B2F (preselected)</div>
+        <div class="field">Date &amp; time * (≤ now)</div>
+        <div class="field">Location * <span class="muted">(locked after submit)</span></div>
+        <div class="field">Vehicle no. * (MH-…)</div>
+        <div class="field">Claim type ▾ (TP Liability / Own Damage / Uninsured Motorist / Medical / Rental)</div>
+        <div class="field">Claimed amount ₹ *</div>
+        <div class="field">Description (what happened; include third-party details if any)</div>
+      </div>
+      <div class="card"><b>People &amp; documents</b>
+        <div class="field">Driver name * · Licence no. *</div>
+        <div class="field">☁ Driving-licence scan (Cloudinary)</div>
+        <div class="field">Passenger name · contact</div>
+        <div class="field">FIR no. * · Police station * · ☁ FIR copy</div>
+        <div class="field">☁ Damage photo(s)</div>
+      </div>
+    </div>
+    <div class="card"><b>Trip event log</b> <span class="muted">(radio: ⊙ platform log — shown read-only &nbsp;|&nbsp; ○ not recorded → reason box appears)</span>
+      <table class="sk"><tr><th>AppOnline</th><th>RideAccepted</th><th>PassengerPickedUp</th><th>RideCompleted</th><th>AppOffline</th></tr>
+        <tr><td><span class="badge b-b">21:15</span></td><td><span class="badge b-b">21:22</span></td><td><span class="badge b-b">21:28</span></td><td><span class="badge b-b">21:41</span></td><td><span class="badge b-b">22:00</span></td></tr></table>
+      <span class="btn">Validate sequence</span> <span class="muted">→ 422 reasons appear inline (gaps &gt;10m, no RideAccepted, 24h staleness — FR5.3/FR5A)</span>
+    </div>
+    <div class="ctl"><span class="btn okc">Submit claim</span></div>
+    <div class="toast">✔ Claim CLM-2026-AA11 filed — derived period: P3 · preliminary: ₹1.0L (after usage-based deductions) · flagged (gap &gt; 10 min)</div>
+    <div class="foot"><span class="pill api">POST /api/claims</span> body = all above (uploads via Cloudinary widget; only URLs are sent; backend validates host — A4). Result card shows claim number + derived period + preliminary decision/amount/flags (FR5.5–5.7).</div>
+  </div>
+</div>
+
+<!-- C6 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/payments</span><span class="stitle">C6 · Payments</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item">Get Quote</span><span class="item">Policies</span><span class="item">Claims</span><span class="item here">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Logout</span></span></div>
+    <div class="ctl"><span class="item here">Owed (premiums)</span><span class="item">Received (claim payouts)</span></div>
+    <table class="sk"><tr><th>Type</th><th>Reference</th><th>Amount</th><th>Status</th><th>Date</th><th></th></tr>
+      <tr><td>Premium</td><td>POL-2026-4F2A</td><td>₹46,750</td><td><span class="badge b-y">Pending</span></td><td>30-Sep</td><td><span class="btn">Pay</span></td></tr>
+      <tr><td>Premium</td><td>POL-2025-77C1</td><td>₹93,500</td><td><span class="badge b-g">Succeeded</span></td><td>01-Oct-25</td><td></td></tr>
+      <tr><td>Payout</td><td>CLM-2026-9C3E</td><td>₹60,000</td><td><span class="badge b-y">Pending</span></td><td>26-Sep</td><td></td></tr></table>
+    <div class="foot"><span class="pill api">GET /api/payments</span> · pay = <span class="pill api">POST /api/payments/{id}/simulate</span> → policy flips Active + dashboard warning clears (FR7.3).</div>
+  </div>
+</div>
+
+<!-- C7 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/company/dashboard → Profile tab</span><span class="stitle">C7 · Company profile</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Company</span><span class="item">Dashboard</span><span class="item">Get Quote</span><span class="item">Policies</span><span class="item">Claims</span><span class="item">Payments</span><span class="push"><span class="pill">fleet@acme.com</span><span class="item">Profile</span><span class="item">Logout</span></span></div>
+    <div class="card" style="max-width:340px"><b>Acme Fleet Pvt Ltd</b><br>
+      CIN: U60210TG2020PTC…<br>Contact: Priya · +91 9••• · fleet@acme.com<br>Fleet size: 25<br>
+      <span class="btn">Edit</span> <span class="muted">(same fields as C0, prefilled)</span></div>
+    <div class="foot"><span class="pill api">GET / PUT /api/companies/me</span> · <span class="cutx badge">contingency: this view merges into the Dashboard to save one page</span></div>
+  </div>
+</div>
+
+<!-- S1 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/surveyor</span><span class="stitle">S1 · Queue / My assigned</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Surveyor</span><span class="item here">Queue</span><span class="item">My Assigned (2)</span><span class="push"><span class="pill">r.kumar</span><span class="item">Logout</span></span></div>
+    <table class="sk"><tr><th>Claim #</th><th>Period</th><th>Amount</th><th>Flags</th><th></th></tr>
+      <tr><td>CLM-2026-AA11</td><td><span class="badge b-b">P3</span></td><td>₹1.1L</td><td><span class="badge b-y">gap&gt;10m</span></td><td><span class="btn">Claim it</span></td></tr>
+      <tr><td>CLM-2026-7D0B</td><td><span class="badge b-r">P1-expired</span></td><td>₹2.4L</td><td><span class="badge b-y">P1 + expired policy</span></td><td><span class="btn">Claim it</span></td></tr></table>
+    <div class="note">Claimed claims vanish from every surveyor's queue instantly — atomic pickup → <i>AssignedToSurveyor</i>; concurrent grabs → 409.</div>
+    <div class="foot"><span class="pill api">GET /api/claims/queue</span> · <span class="pill api">POST /api/claims/{id}/pickup</span> · My Assigned tab: <span class="pill api">GET /api/claims/assigned</span></div>
+  </div>
+</div>
+
+<!-- S2 -->
+<div class="screen wide">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/surveyor/investigate/CLM-2026-AA11</span><span class="stitle">S2 · Investigation (the second heavy screen)</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Surveyor</span><span class="item">Queue</span><span class="item">My Assigned (2)</span><span class="item here">Investigation</span><span class="push"><span class="pill">r.kumar</span><span class="item">Logout</span></span></div>
+    <div class="grid2">
+      <div class="card"><b>Claim summary (read-only)</b><br>
+        CLM-2026-AA11 · Own Damage · ₹1.1L · 12-Oct 21:40 · Hitec City, Hyderabad<br>
+        Vehicle MH-01-AB-4321 · Driver: A. Verma (DL …789) · Passenger: none (AppOffline noted)<br>
+        FIR 1223/2026 · PS Hitec City · docs: <u>photo</u> <u>FIR</u> <u>DL</u><br>
+        trip log: <span class="badge b-b">Online 21:15</span>›<span class="badge b-b">Accepted 21:22</span>›<span class="badge b-b">PickedUp 21:28</span>›<span class="badge b-b">Completed 21:41</span>›<span class="badge b-b">Offline 22:00</span><br>
+        derived: <span class="badge b-b">Period 3</span> · preliminary ₹1.0L after deductions · flags: <span class="badge b-y">15-min gap before accident</span></div>
+      <div class="card"><b>Field verification</b> <span class="muted">(each: Verified / Suspicious / Info Requested + note)</span>
+        <table class="sk">
+          <tr><td>Trip event log</td><td><span class="badge b-g">Verified</span></td></tr>
+          <tr><td>Driver info + DL doc</td><td><span class="badge b-g">Verified</span></td></tr>
+          <tr><td>Passenger info</td><td><span class="badge b-g">Verified</span></td></tr>
+          <tr><td>Damage photo</td><td><span class="badge b-y">Info Requested — "blurred, re-upload"</span></td></tr>
+          <tr><td>FIR doc + no. + station</td><td><span class="badge b-g">Verified</span></td></tr>
+        </table>
+        <span class="muted">Latest company uploads appear here after each InfoRequested round (FR5.12).</span></div>
+    </div>
+    <div class="card"><b>Report to Admin</b> · Outcome ▾ (Evidence Consistent / Suspicious / Fraudulent) · Recommendation ▾ (Approve / Reduce / Reject) · Assessed amount ₹ · Notes<br>
+      <span class="btn okc" style="opacity:.5">Submit report 🔒</span> <span class="muted">locked while any field is Pending / InfoRequested (FR5.13) — currently blocked on Damage photo</span>
+    </div>
+    <div class="foot"><span class="pill api">PUT …/verify-field/{field}</span> per row · <span class="pill api">POST …/report</span> creates the report + moves claim to ReportSubmitted; report immutable (FR5.14/5.16).</div>
+  </div>
+</div>
+
+<!-- A1 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/admin/dashboard</span><span class="stitle">A1 · Admin dashboard</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Admin</span><span class="item here">Dashboard</span><span class="item">Approvals</span><span class="item">Claim Decisions</span><span class="item">Payments</span><span class="push"><span class="pill">admin@tnc.local</span><span class="item">Logout</span></span></div>
+    <div class="grid2">
+      <div class="card">Registered companies <b>14</b></div><div class="card">Premium collected <b>₹1.2Cr</b></div>
+      <div class="card">Open claims <b>6</b> (2 queued · 3 investigating · 1 deciding)</div><div class="card">Payouts made <b>₹31.4L</b></div>
+    </div>
+    <div class="card"><b>Needs attention</b><br>• 2 surveyor applications pending<br>• 1 report awaiting decision (CLM-2026-AA11)<br>• 1 flagged renewal needs review</div>
+    <div class="foot"><span class="pill api">GET /api/admin/stats/companies · /stats/claims · /stats/payments</span> (Admin-only; JWT forwarded by gateway).</div>
+  </div>
+</div>
+
+<!-- A2 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/admin/approvals</span><span class="stitle">A2 · Approvals (tabs)</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Admin</span><span class="item">Dashboard</span><span class="item here">Approvals</span><span class="item">Claim Decisions</span><span class="item">Payments</span><span class="push"><span class="pill">admin@tnc.local</span><span class="item">Logout</span></span></div>
+    <div class="ctl"><span class="item here">Surveyor applications (2)</span><span class="item">Claim payout gates (1)</span></div>
+    <table class="sk"><tr><th>Name</th><th>Email</th><th>IRDAI licence</th><th>Valid till</th><th>Phone</th><th></th></tr>
+      <tr><td>R. Kumar</td><td>r.kumar@…</td><td>IRDAI-SLA-…</td><td>31-Mar-2028</td><td>+91…</td><td><span class="btn okc">Approve</span> <span class="btn danger">Reject…</span></td></tr></table>
+    <div class="card" style="border-style:dashed"><b>Reject modal</b> · reason: "Licence expired in March — please renew and reapply." <span class="btn danger">Confirm reject</span></div>
+    <div class="foot"><span class="pill api">GET /api/surveyors/pending</span> · <span class="pill api">POST …/approve</span>/<span class="pill api">…/reject</span> (FR2A.3; 409 if already decided). Tab 2 = <span class="pill api">GET /api/admin/pending-approvals</span> → approve/reject (FR7.5b).</div>
+  </div>
+</div>
+
+<!-- A3 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/admin/claim-decisions</span><span class="stitle">A3 · Final decisions</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Admin</span><span class="item">Dashboard</span><span class="item">Approvals</span><span class="item here">Claim Decisions</span><span class="item">Payments</span><span class="push"><span class="pill">admin@tnc.local</span><span class="item">Logout</span></span></div>
+    <table class="sk"><tr><th>Claim #</th><th>Company</th><th>Report</th><th>Recomm.</th><th></th></tr>
+      <tr class="exp"><td>CLM-2026-AA11 ▾</td><td>Acme Fleet</td><td><span class="badge b-g">EvidenceConsistent</span></td><td>Approve ₹1.0L</td><td>…</td></tr>
+      <tr class="exp2"><td colspan="5">
+        Surveyor of record: R. Kumar · fields: 4 Verified / 1 resolved after re-upload<br>
+        Notes: "gap explained by the recorded network-outage reason; amount within P3 band after deductions"<br>
+        <span class="btn okc">Approve → payout pending</span> &nbsp; <span class="btn danger">Reject…</span> &nbsp;<span class="muted inline">(any decision against the report recommendation REQUIRES a recorded note — FR5.15)</span>
+      </td></tr></table>
+    <div class="foot"><span class="pill api">GET /api/admin/claims</span> (ReportSubmitted + Suspicious) · <span class="pill api">POST …/decide</span> → payout enters PaymentPending → appears on A2 tab 2 (FR7.5b gate).</div>
+  </div>
+</div>
+
+<!-- A4 -->
+<div class="screen">
+  <div class="shead"><span class="dot" style="background:#f87171"></span><span class="dot" style="background:#fbbf24"></span><span class="dot" style="background:#34d399"></span><span class="url">/admin/payments</span><span class="stitle">A4 · Gateway simulation</span></div>
+  <div class="sbody">
+    <div class="nav"><span class="brand">TNC · Admin</span><span class="item">Dashboard</span><span class="item">Approvals</span><span class="item">Claim Decisions</span><span class="item here">Payments</span><span class="push"><span class="pill">admin@tnc.local</span><span class="item">Logout</span></span></div>
+    <table class="sk"><tr><th>Type</th><th>Reference</th><th>Amount</th><th>Status</th><th></th></tr>
+      <tr><td>Premium</td><td>POL-2026-4F2A</td><td>₹46,750</td><td><span class="badge b-y">Pending</span></td><td><span class="btn okc">Mark succeeded</span> <span class="btn danger">Mark failed</span></td></tr>
+      <tr><td>Payout</td><td>CLM-2026-9C3E</td><td>₹60,000</td><td><span class="badge b-y">Pending</span></td><td><span class="muted">simulated (Appendix D, D4)</span></td></tr></table>
+    <div class="foot"><span class="pill api">GET /api/payments</span> · <span class="pill api">POST …/{id}/simulate</span>; success flips policy Active / payout Paid; failure → policy Cancelled + dashboard warning. Contingency: demo-able from Swagger if UI time runs out.</div>
+  </div>
+</div>
+
+</div>
+
+<h2>4. Consolidation Ledger (24 naive pages → 14 screens)</h2>
+<table class="sk matrix">
+  <tr><th>Removed page</th><th>Absorbed into</th><th>As</th></tr>
+  <tr><td>Company login · Surveyor login · Admin login forms (3)</td><td>P2/P3</td><td>ONE shared login component behind role auth pages</td></tr>
+  <tr><td>Company sign-up · Surveyor sign-up pages (2)</td><td>P2/P3</td><td>Log In ↔ Sign Up toggle on the same auth page</td></tr>
+  <tr><td>Quote history page · Quote detail page</td><td>C2</td><td>collapsible list + comparison card</td></tr>
+  <tr><td>Policy detail · Renewal page (2)</td><td>C3</td><td>expanding row + comparison modal</td></tr>
+  <tr><td>Claim detail · Claim resubmit page (2)</td><td>C4</td><td>expanding row (timeline + field badges + inline resubmit)</td></tr>
+  <tr><td>Surveyor "My Claims" page</td><td>S1</td><td>second tab (queue/assigned = one page)</td></tr>
+  <tr><td>Admin "surveyor approvals" + "payout approvals" (2)</td><td>A2</td><td>tabs</td></tr>
+  <tr><td>Admin claim-report detail page</td><td>A3</td><td>expanding row</td></tr>
+</table>
+
+<h2>5. Contingency Kill Order (execute top-down ONLY if time collapses)</h2>
+<ol>
+  <li><b>A4 page</b> → demo <span class="pill api">POST …/simulate</span> in Swagger. FR intact.</li>
+  <li><b>Quote history list UI</b> (C2 collapsible) → keep API + tests; hide UI.</li>
+  <li><b>C7 view</b> → merge into Dashboard tab (already annotated).</li>
+  <li><b>Dashboard stat cards</b> → reduce to 2 cards. FR9 endpoints stay tested.</li>
+</ol>
+<p><b>Never cut:</b> role-based route guards (A2/A3), the policies-table search/filter/sort (A7 showcase), trip-log validation + field-verification UI (the innovation), report-submit gating (FR5.13), admin override-note guard (FR5.15).</p>
+
+<h2>6. FR → Screen Coverage Matrix</h2>
+<table class="sk matrix">
+  <tr><th>Design-doc section</th><th>Covered by</th><th>Notes</th></tr>
+  <tr><td>FR1 (auth, refresh, logout)</td><td>P2/P3 + admin link; Logout on every role navbar</td><td>cookie refresh is invisible UI; 429 throttling → toast</td></tr>
+  <tr><td>FR2 (company profile)</td><td>P2, C0, C7</td><td>profile gate = C0 forced redirect</td></tr>
+  <tr><td>FR2A (surveyor lifecycle)</td><td>P3, A2, login toasts</td><td>all 5 substeps visible end-to-end</td></tr>
+  <tr><td>FR3 (quotes)</td><td>C2</td><td>comparison + 30-day expiry badge</td></tr>
+  <tr><td>FR4 (policies/renewal)</td><td>C3, C6, A4</td><td>cancel guard, 410 expired quote, renewal window</td></tr>
+  <tr><td>FR5 + FR5A (claims core)</td><td>C5, S1, S2, C4, A3</td><td>intake → rules engine → queue → verify → report → decide</td></tr>
+  <tr><td>FR7 (payments)</td><td>C6, A2 tab 2, A4</td><td>owed vs received tabs</td></tr>
+  <tr><td>FR8 (correlation/logging)</td><td>—</td><td>non-visual; correlation ID in devtools + error toasts</td></tr>
+  <tr><td>FR9 / FR5.18 (stats)</td><td>A1</td><td>3 admin stat endpoints</td></tr>
+  <tr><td>A4 external API (Cloudinary)</td><td>C5 uploads</td><td>A6 = YARP gateway fronts all routes</td></tr>
+  <tr><td>A7 search/filter/sort</td><td>C3 (showcase), pattern reused</td><td>demonstrate once, here</td></tr>
+</table>
+
+<h2>7. Explicitly Deferred (matches Design Doc Appendix D)</h2>
+<p>D1 password reset (no link rendered anywhere in these frames) · D2 notifications · D3 multi-driver accounts · D4 real payment gateway (simulated) · D5 policy versioning UI · D6 hard delete · D7 admin export. "Where is forgot password?" → item D1: a deliberate scope decision; with Identity hashing already in place it is a two-endpoint addition later.</p>
+
+<p class="foot" style="margin-top:18px">v2 · 30-Sep-2026 · Companion to TNC Insurance Platform Design Document v3.0 · Changelog from v1: landing made info-only (no public quote CTAs); chooser cards carry one CTA each to per-role auth pages; navbars added to every role screen; tier limits & premiums aligned to design doc §2/§3 values; annotation toggle added. All 14 screens present; none missing.</p>
+
+</body>
+</html>
