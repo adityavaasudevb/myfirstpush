@@ -1,0 +1,130 @@
+<div class="mx-auto max-w-3xl">
+  <div class="mb-6 flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight text-ink">Apply for policy</h1>
+      <p class="mt-1 text-sm text-ink-soft">Review your cover and submit — your final premium is confirmed instantly.</p>
+    </div>
+    <a routerLink="/company/quotes" class="btn-outline">← My quotes</a>
+  </div>
+
+  <!-- ======================= Step 3 · Paid ======================= -->
+  @if (paid(); as p) {
+    <div class="card p-8 text-center">
+      <div class="mx-auto grid h-14 w-14 place-items-center rounded-full bg-green-100 text-2xl">✅</div>
+      <h2 class="mt-4 text-xl font-bold text-ink">Policy active</h2>
+      <p class="mt-1 font-mono text-sm text-primary">{{ p.policyNumber }}</p>
+      <p class="mx-auto mt-3 max-w-md text-sm text-ink-soft">
+        Your coverage is live: <b>{{ p.startDateUtc | date: 'mediumDate' }}</b> → <b>{{ p.endDateUtc | date: 'mediumDate' }}</b>.
+      </p>
+      <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
+        <a routerLink="/company" class="btn-outline">← Workspace</a>
+        <a routerLink="/company/quotes" class="btn-secondary">My quotes</a>
+      </div>
+    </div>
+
+  <!-- ===================== Step 2 · Created, pay ===================== -->
+  } @else if (applied(); as a) {
+    <div class="card p-8">
+      <div class="grid h-12 w-12 place-items-center rounded-full bg-blue-100 text-xl">🧾</div>
+      <h2 class="mt-4 text-xl font-bold text-ink">Application accepted</h2>
+      <p class="mt-1 font-mono text-sm text-primary">{{ a.policyNumber }}</p>
+      <div class="mt-4 flex flex-wrap items-center gap-x-8 gap-y-2 text-sm text-ink-soft">
+        <span>Final premium: <b class="text-2xl font-extrabold tabular-nums text-ink">{{ a.premiumInr | money }}</b></span>
+        <span class="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">{{ a.status }} — awaiting payment</span>
+      </div>
+      <p class="mt-3 text-xs text-ink-soft">Paying activates the policy instantly for a 365-day term.</p>
+
+      @if (payError()) {
+        <div class="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-danger">{{ payError() }}</div>
+      }
+
+      <div class="mt-6 flex flex-wrap items-center gap-3">
+        <button type="button" class="btn-primary" (click)="pay()" [disabled]="paying()">
+          {{ paying() ? 'Paying…' : 'Pay ' + (a.premiumInr | money) + ' now →' }}
+        </button>
+        <a routerLink="/company" class="btn-outline">Pay later</a>
+      </div>
+    </div>
+
+  <!-- ======================= Step 1 · the form ======================= -->
+  } @else {
+    <div class="card space-y-6 p-6">
+
+      <!-- From-quote summary (inputs locked) -->
+      @if (quoteId) {
+        @if (loadingQuote()) {
+          <p class="py-8 text-center text-sm text-ink-soft">Loading quote…</p>
+        } @else if (quoteError()) {
+          <div class="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-danger">{{ quoteError() }}</div>
+        } @else if (quote(); as q) {
+          <div class="rounded-2xl bg-primary-faint p-5">
+            <p class="text-xs font-semibold uppercase tracking-wide text-primary">Applying from quote</p>
+            <p class="mt-1 font-mono text-sm font-semibold text-ink">{{ q.quoteNumber }}</p>
+            <dl class="mt-3 space-y-1.5 text-sm text-ink-soft">
+              <div class="flex justify-between"><dt>Fleet size</dt><dd class="font-medium text-ink">{{ q.fleetSize }} vehicles</dd></div>
+              <div class="flex justify-between"><dt>Tier</dt><dd class="font-medium text-ink">{{ q.tier }}</dd></div>
+              <div class="flex justify-between gap-2"><dt>Add-ons</dt><dd class="text-right font-medium text-ink">{{ q.addOns.length ? q.addOns.join(', ') : 'None' }}</dd></div>
+              <div class="flex justify-between"><dt>Estimated premium</dt><dd class="font-bold tabular-nums text-ink">{{ q.premiumInr | money }}</dd></div>
+            </dl>
+            <p class="mt-3 text-xs text-ink-soft">Details are locked to this quote — your final premium is confirmed at submission.</p>
+          </div>
+        }
+
+      <!-- From-scratch inputs -->
+      } @else {
+        <div>
+          <label class="label" for="fleet">Fleet size (vehicles)</label>
+          <input id="fleet" type="number" min="1" class="input w-40" formControlName="fleetSize" />
+          @if (form.controls.fleetSize.touched && form.controls.fleetSize.invalid) {
+            <p class="mt-1 text-xs text-danger">At least one vehicle is required.</p>
+          }
+        </div>
+
+        <fieldset>
+          <legend class="label">Coverage tier</legend>
+          <div class="grid gap-3 sm:grid-cols-2">
+            @for (t of tiers; track t.key) {
+              <label class="relative cursor-pointer rounded-2xl border-2 p-4 transition"
+                [class.border-primary]="form.controls.tier.value === t.key"
+                [class.bg-primary-faint]="form.controls.tier.value === t.key"
+                [class.border-warm]="form.controls.tier.value !== t.key">
+                <input type="radio" class="sr-only" formControlName="tier" [value]="t.key" />
+                @if (form.controls.tier.value === t.key) {
+                  <span class="absolute right-3 top-3 grid h-5 w-5 place-items-center rounded-full bg-primary text-[11px] font-bold text-white">✓</span>
+                }
+                <span class="block text-sm font-bold text-ink">{{ t.key }}</span>
+                <span class="mt-1 block text-xs leading-relaxed text-ink-soft">{{ t.blurb }}</span>
+              </label>
+            }
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend class="label">Add-ons <span class="font-normal text-ink-soft">(optional)</span></legend>
+          <div class="flex flex-wrap gap-2.5">
+            @for (a of addOns; track a.key) {
+              <button type="button" (click)="toggleAddOn(a.key)" [title]="a.blurb"
+                class="rounded-full border px-4 py-2 text-sm font-semibold shadow-sm transition"
+                [class.bg-primary]="hasAddOn(a.key)"
+                [class.text-white]="hasAddOn(a.key)"
+                [class.border-primary]="hasAddOn(a.key)"
+                [class.bg-white]="!hasAddOn(a.key)"
+                [class.text-ink]="!hasAddOn(a.key)"
+                [class.border-warm]="!hasAddOn(a.key)">
+                @if (hasAddOn(a.key)) { <span class="mr-1">✓</span> }{{ a.key }}
+              </button>
+            }
+          </div>
+        </fieldset>
+      }
+
+      @if (submitError()) {
+        <div class="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-danger">{{ submitError() }}</div>
+      }
+
+      <button type="button" class="btn-primary" (click)="submit()" [disabled]="submitting() || (!!quoteId && !quote())">
+        {{ submitting() ? 'Submitting…' : quoteId ? 'Submit application →' : 'Review &amp; submit →' }}
+      </button>
+    </div>
+  }
+</div>
