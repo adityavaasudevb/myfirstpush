@@ -1,0 +1,73 @@
+<section class="mx-auto max-w-6xl px-4 py-10">
+  <div class="mb-8">
+    <h1 class="font-serif text-3xl font-semibold text-ink">Welcome back</h1>
+    <p class="mt-1 text-sm text-ink-soft">
+      @if (profile.profile(); as p) {
+        <b class="font-semibold text-ink">{{ p.name }}</b> — quotes, policies and claims, all in one place.
+      } @else {
+        Quotes, policies and claims, all in one place.
+      }
+    </p>
+  </div>
+
+  <!-- At-a-glance stats -->
+  <div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <a routerLink="/company/policies" class="card p-4 transition hover:shadow-md">
+      <p class="text-xs font-bold uppercase tracking-wide text-ink-soft">Active policies</p>
+      <p class="mt-1 text-3xl font-extrabold tabular-nums text-ink">{{ activePolicies() ?? '—' }}</p>
+    </a>
+    <a routerLink="/company/policies" class="card p-4 transition hover:shadow-md">
+      <p class="text-xs font-bold uppercase tracking-wide text-amber-700">Pending payments</p>
+      <p class="mt-1 text-3xl font-extrabold tabular-nums" [class]="pendingPayments() ? 'text-amber-700' : 'text-ink'">{{ pendingPayments() ?? '—' }}</p>
+    </a>
+    <a routerLink="/company/quotes" class="card p-4 transition hover:shadow-md">
+      <p class="text-xs font-bold uppercase tracking-wide text-ink-soft">Quotes</p>
+      <p class="mt-1 text-3xl font-extrabold tabular-nums text-ink">{{ quotesTotal() ?? '—' }}</p>
+    </a>
+    <a routerLink="/company/claims" class="card p-4 transition hover:shadow-md">
+      <p class="text-xs font-bold uppercase tracking-wide text-ink-soft">Claims</p>
+      <p class="mt-1 text-3xl font-extrabold tabular-nums text-ink">{{ claimsTotal() ?? '—' }}</p>
+    </a>
+  </div>
+
+  <div class="grid gap-4 md:grid-cols-3">
+    <a routerLink="/company/quotes/new" class="card group p-5 transition hover:shadow-md">
+      <div class="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-primary-faint text-lg transition group-hover:bg-primary group-hover:text-white">🧾</div>
+      <h3 class="font-semibold text-ink">Get a quote</h3>
+      <p class="mt-1 text-xs leading-relaxed text-ink-soft">Price a fleet policy — pick a tier &amp; add-ons, get an instant premium.</p>
+      <span class="mt-3 inline-block text-sm font-semibold text-primary">Get estimate →</span>
+    </a>
+
+    <a routerLink="/company/quotes" class="card group p-5 transition hover:shadow-md">
+      <div class="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-primary-faint text-lg transition group-hover:bg-primary group-hover:text-white">📂</div>
+      <h3 class="font-semibold text-ink">My quotes</h3>
+      <p class="mt-1 text-xs leading-relaxed text-ink-soft">Every saved estimate, with status badges and expiry.</p>
+      <span class="mt-3 inline-block text-sm font-semibold text-primary">View quotes →</span>
+    </a>
+
+    <a routerLink="/company/policies" class="card group p-5 transition hover:shadow-md">
+      <div class="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-primary-faint text-lg transition group-hover:bg-primary group-hover:text-white">📑</div>
+      <h3 class="font-semibold text-ink">My policies</h3>
+      <p class="mt-1 text-xs leading-relaxed text-ink-soft">Live cover, pending payments and claims-ratio-priced renewals.</p>
+      <span class="mt-3 inline-block text-sm font-semibold text-primary">View policies →</span>
+    </a>
+
+    <a routerLink="/company/claims" class="card group p-5 transition hover:shadow-md">
+      <div class="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-primary-faint text-lg transition group-hover:bg-primary group-hover:text-white">🛡️</div>
+      <h3 class="font-semibold text-ink">My claims</h3>
+      <p class="mt-1 text-xs leading-relaxed text-ink-soft">Assessments, survey progress and payouts in one view.</p>
+      <span class="mt-3 inline-block text-sm font-semibold text-primary">View claims →</span>
+    </a>
+
+    <a routerLink="/company/claims/new" class="card group p-5 transition hover:shadow-md">
+      <div class="mb-3 grid h-10 w-10 place-items-center rounded-xl bg-primary-faint text-lg transition group-hover:bg-primary group-hover:text-white">➕</div>
+      <h3 class="font-semibold text-ink">File a claim</h3>
+      <p class="mt-1 text-xs leading-relaxed text-ink-soft">Incident details and trip log — instant first assessment.</p>
+      <span class="mt-3 inline-block text-sm font-semibold text-primary">Start a claim →</span>
+    </a>
+  </div>
+
+  <p class="mt-8 text-center text-xs text-ink-soft">
+    <a routerLink="/" class="underline underline-offset-2 hover:text-primary">← Back to landing</a>
+  </p>
+</section>
