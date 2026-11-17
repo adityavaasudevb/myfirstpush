@@ -1,0 +1,53 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.Domain/Entities/ClaimDocument.cs
+using InsuranceService.Domain.Constants;
+
+namespace InsuranceService.Domain.Entities;
+
+/// <summary>
+/// v3.4 (FR5.1 amended, closes the upload half of D8) — evidence attached by the
+/// company at filing time. The bytes live on the Insurance service's disk; this row
+/// holds the metadata and the AI-audit cache key (Sha256, so the same file audited
+/// twice costs one model call, not two).
+///
+/// Immutability: documents can only be attached or removed while the claim is still
+/// AwaitingSurveyorPickup. Once a surveyor picks the claim up the evidence set is
+/// frozen (FR5.16) — enforced in ClaimDocumentService, not here.
+/// </summary>
+public class ClaimDocument
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ClaimId { get; set; }
+
+    /// <summary>Canonical key from ClaimDocumentTypes (FIR, RepairEstimate, MedicalBill, RentalInvoice, Other).</summary>
+    public string DocumentType { get; set; } = ClaimDocumentTypes.Other;
+
+    /// <summary>The name the user uploaded. Display only — never used to build a path.</summary>
+    public string OriginalFileName { get; set; } = string.Empty;
+
+    /// <summary>Server-generated name ({guid}.ext). Never derived from user input, so no path traversal.</summary>
+    public string StoredFileName { get; set; } = string.Empty;
+
+    /// <summary>Sniffed from the file's magic bytes, not trusted from the request.</summary>
+    public string ContentType { get; set; } = "application/octet-stream";
+
+    public long SizeBytes { get; set; }
+
+    /// <summary>Lower-case hex SHA-256 of the file bytes — the AI audit cache key.</summary>
+    public string Sha256 { get; set; } = string.Empty;
+
+    public string UploadedByUserId { get; set; } = string.Empty;
+    public DateTimeOffset UploadedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+
+    // ---- AI audit (v3.4) — all null until the surveyor runs the check ----
+
+    /// <summary>Processing | Completed | Failed | Unavailable (see AiStatuses).</summary>
+    public string? AiStatus { get; set; }
+
+    /// <summary>Model that produced the findings, e.g. gemini-3.5-flash-lite or "in-process".</summary>
+    public string? AiModel { get; set; }
+
+    /// <summary>Serialized finding cards rendered by the UI. Null until a completed audit.</summary>
+    public string? AiFindingsJson { get; set; }
+
+    public DateTimeOffset? AiReviewedAtUtc { get; set; }
+}

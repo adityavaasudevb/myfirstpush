@@ -1,0 +1,84 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.API/Controllers/ClaimDocumentsController.cs
+using InsuranceService.Application.Interfaces;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace InsuranceService.API.Controllers;
+
+/// <summary>
+/// v3.4 — evidence attachments (FR5.1 amended, closes the upload half of D8).
+///
+/// Route note: deliberately nested under api/claims/{claimId}/documents rather than a
+/// top-level api/documents route, because the gateway forwards only
+/// /api/claims/{**rest} to the Insurance cluster — a top-level route would 404 in the
+/// browser while working fine in Swagger.
+///
+/// Authorization: upload/delete = owning Company only (and only before pickup).
+/// Read = owning Company, assigned Surveyor, any Admin.
+/// </summary>
+[ApiController]
+[Route("api/claims/{claimId:guid}/documents")]
+[Authorize]
+public class ClaimDocumentsController : ControllerBase
+{
+    private const long MaxRequestBytes = 5 * 1024 * 1024; // keep in sync with ClaimDocumentService
+
+    private readonly IClaimDocumentService _documents;
+    public ClaimDocumentsController(IClaimDocumentService documents) => _documents = documents;
+
+    private string CallerId =>
+        User.FindFirst("sub")?.Value
+        ?? throw new UnauthorizedAccessException("Missing sub claim.");
+    private string CallerRole => User.FindFirst("role")?.Value ?? string.Empty;
+
+    /// <summary>FR5.10/FR5.17 — list the claim's evidence. Company (own), assigned Surveyor, Admin.</summary>
+    [HttpGet]
+    [Authorize(Roles = "Company,Surveyor,Admin")]
+    public async Task<IActionResult> List(Guid claimId, CancellationToken ct)
+        => Ok(await _documents.ListAsync(claimId, CallerId, CallerRole, ct));
+
+    /// <summary>
+    /// FR5.1 (amended v3.4) — upload one evidence document at filing time.
+    /// multipart/form-data: file + documentType. 400 bad type/too big, 403 not owner,
+    /// 409 evidence already frozen at pickup (FR5.16).
+    /// </summary>
+    [HttpPost]
+    [Authorize(Roles = "Company")]
+    [RequestSizeLimit(MaxRequestBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = MaxRequestBytes)]
+    public async Task<IActionResult> Upload(
+        Guid claimId,
+        [FromForm] string documentType,
+        [FromForm] IFormFile file,
+        CancellationToken ct)
+    {
+        if (file is null || file.Length == 0)
+            return BadRequest(new { message = "A file is required." });
+
+        await using var stream = file.OpenReadStream();
+        var dto = await _documents.UploadAsync(
+            claimId, CallerId, documentType, file.FileName, stream, ct);
+        return StatusCode(StatusCodes.Status201Created, dto);
+    }
+
+    /// <summary>Streams the evidence back for viewing. inline so the browser renders the PDF.</summary>
+    [HttpGet("{documentId:guid}")]
+    [Authorize(Roles = "Company,Surveyor,Admin")]
+    public async Task<IActionResult> Download(Guid claimId, Guid documentId, CancellationToken ct)
+    {
+        var (bytes, contentType, fileName) = await _documents.DownloadAsync(
+            claimId, documentId, CallerId, CallerRole, ct);
+
+        Response.Headers.ContentDisposition = $"inline; filename=\"{fileName.Replace("\"", "")}\"";
+        return File(bytes, contentType);
+    }
+
+    /// <summary>Remove evidence before pickup. 409 once a surveyor has the claim.</summary>
+    [HttpDelete("{documentId:guid}")]
+    [Authorize(Roles = "Company,Admin")]
+    public async Task<IActionResult> Delete(Guid claimId, Guid documentId, CancellationToken ct)
+    {
+        await _documents.DeleteAsync(claimId, documentId, CallerId, CallerRole, ct);
+        return NoContent();
+    }
+}

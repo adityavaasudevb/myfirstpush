@@ -1,0 +1,267 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.Infrastructure/Services/ClaimDocumentService.cs
+using InsuranceService.Application.Dtos;
+using InsuranceService.Application.Interfaces;
+using InsuranceService.Domain.Constants;
+using InsuranceService.Domain.Entities;
+using InsuranceService.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using TNCInsurance.Shared.Exceptions;
+
+namespace InsuranceService.Infrastructure.Services;
+
+/// <summary>
+/// v3.4 (FR5.1 amended — closes the upload half of D8). Evidence documents live on local
+/// disk under DocumentStorage:RootPath; the database holds metadata only. The stored
+/// file name is a server-generated GUID — user input never reaches a filesystem path.
+///
+/// Lifecycle gates:
+///  · attach/delete only while the claim is AwaitingSurveyorPickup (evidence freezes at
+///    pickup — FR5.16);
+///  · read for the owning company, the assigned surveyor, or any Admin (FR5.10/FR5.14/FR5.17).
+/// </summary>
+public class ClaimDocumentService : IClaimDocumentService
+{
+    private const long MaxBytesPerFile = 5 * 1024 * 1024;      // 5 MB
+    private const int MaxDocumentsPerClaim = 10;
+
+    /// <summary>Magic-byte sniffing — the request's Content-Type header is never trusted.</summary>
+    private static readonly (string Extension, string ContentType, byte[] Magic, int Offset)[] Signatures =
+    {
+        (".pdf", "application/pdf", new byte[] { 0x25, 0x50, 0x44, 0x46 }, 0),            // %PDF
+        (".jpg", "image/jpeg", new byte[] { 0xFF, 0xD8, 0xFF }, 0),
+        (".png", "image/png", new byte[] { 0x89, 0x50, 0x4E, 0x47 }, 0)
+    };
+
+    private readonly InsuranceDbContext _db;
+    private readonly ICompanyResolver _companies;
+    private readonly IConfiguration _config;
+    private readonly ILogger<ClaimDocumentService> _log;
+
+    public ClaimDocumentService(
+        InsuranceDbContext db, ICompanyResolver companies, IConfiguration config,
+        ILogger<ClaimDocumentService> log)
+    {
+        _db = db;
+        _companies = companies;
+        _config = config;
+        _log = log;
+    }
+
+    private string RootPath
+    {
+        get
+        {
+            var configured = _config["DocumentStorage:RootPath"];
+            var root = string.IsNullOrWhiteSpace(configured)
+                ? Path.Combine(AppContext.BaseDirectory, "uploads")
+                : (Path.IsPathRooted(configured) ? configured : Path.Combine(AppContext.BaseDirectory, configured));
+            Directory.CreateDirectory(root);
+            return root;
+        }
+    }
+
+    private string ClaimFolder(Guid claimId) => Path.Combine(RootPath, claimId.ToString("N"));
+
+    // ---------------------------------------------------------------- upload
+
+    public async Task<ClaimDocumentDto> UploadAsync(
+        Guid claimId, string callerUserId, string documentType,
+        string originalFileName, Stream content, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.AsNoTracking().FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+
+        var companyId = await ResolveOwnCompanyIdAsync(ct);
+        if (claim.PolicyId == Guid.Empty)
+            throw new ValidationException("Claim has no policy.");
+        var ownsPolicy = await _db.Policies.AsNoTracking()
+            .AnyAsync(p => p.Id == claim.PolicyId && p.CompanyProfileId == companyId, ct);
+        if (!ownsPolicy)
+            throw new UnauthorizedRoleException("You can only attach evidence to your own claims.");
+
+        if (claim.Status != ClaimStatuses.AwaitingSurveyorPickup)
+            throw new ConflictException(
+                $"Evidence is frozen at surveyor pickup (FR5.16) — this claim is {claim.Status}. Documents cannot be added now.");
+
+        var type = ClaimDocumentTypes.All.FirstOrDefault(t =>
+                       string.Equals(t, documentType?.Trim(), StringComparison.OrdinalIgnoreCase))
+                   ?? throw new ValidationException(
+                       $"Unknown document type. Valid types: {string.Join(", ", ClaimDocumentTypes.All)}.");
+
+        var existingCount = await _db.ClaimDocuments.CountAsync(d => d.ClaimId == claimId, ct);
+        if (existingCount >= MaxDocumentsPerClaim)
+            throw new ValidationException($"At most {MaxDocumentsPerClaim} documents can be attached to one claim.");
+
+        // Read into memory so we can sniff, hash and size-check before anything touches disk.
+        using var buffer = new MemoryStream();
+        await content.CopyToAsync(buffer, ct);
+        var bytes = buffer.ToArray();
+
+        if (bytes.Length == 0)
+            throw new ValidationException("The uploaded file is empty.");
+        if (bytes.Length > MaxBytesPerFile)
+            throw new ValidationException("Each document must be 5 MB or smaller.");
+
+        var signature = Sniff(bytes)
+            ?? throw new ValidationException("Only PDF, JPG and PNG files are accepted.");
+
+        var folder = ClaimFolder(claimId);
+        Directory.CreateDirectory(folder);
+        var storedName = $"{Guid.NewGuid():N}{signature.Extension}";
+        await File.WriteAllBytesAsync(Path.Combine(folder, storedName), bytes, ct);
+
+        var doc = new ClaimDocument
+        {
+            Id = Guid.NewGuid(),
+            ClaimId = claimId,
+            DocumentType = type,
+            OriginalFileName = SanitizeName(originalFileName, signature.Extension),
+            StoredFileName = storedName,
+            ContentType = signature.ContentType,
+            SizeBytes = bytes.Length,
+            Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(),
+            UploadedByUserId = callerUserId
+        };
+        _db.ClaimDocuments.Add(doc);
+        await _db.SaveChangesAsync(ct);
+
+        _log.LogInformation("Document {DocumentId} ({Type}, {Bytes} bytes) attached to claim {ClaimNumber}.",
+            doc.Id, doc.DocumentType, doc.SizeBytes, claim.ClaimNumber);
+
+        return ToDto(doc);
+    }
+
+    // ---------------------------------------------------------------- read
+
+    public async Task<IReadOnlyList<ClaimDocumentDto>> ListAsync(
+        Guid claimId, string callerUserId, string callerRole, CancellationToken ct = default)
+    {
+        await EnsureCanReadAsync(claimId, callerUserId, callerRole, ct);
+        var docs = await _db.ClaimDocuments.AsNoTracking()
+            .Where(d => d.ClaimId == claimId)
+            .OrderBy(d => d.UploadedAtUtc)
+            .ToListAsync(ct);
+        return docs.Select(ToDto).ToList();
+    }
+
+    public async Task<(byte[] Bytes, string ContentType, string FileName)> DownloadAsync(
+        Guid claimId, Guid documentId, string callerUserId, string callerRole, CancellationToken ct = default)
+    {
+        await EnsureCanReadAsync(claimId, callerUserId, callerRole, ct);
+
+        var doc = await _db.ClaimDocuments.AsNoTracking()
+                      .FirstOrDefaultAsync(d => d.Id == documentId && d.ClaimId == claimId, ct)
+                  ?? throw new EntityNotFoundException("Document not found.");
+
+        // StoredFileName is server-generated; the full path is re-combined and checked anyway.
+        var path = Path.GetFullPath(Path.Combine(ClaimFolder(claimId), doc.StoredFileName));
+        if (!path.StartsWith(Path.GetFullPath(ClaimFolder(claimId)), StringComparison.Ordinal))
+            throw new EntityNotFoundException("Document not found.");
+        if (!File.Exists(path))
+            throw new EntityNotFoundException("The stored file is missing from disk.");
+
+        return (await File.ReadAllBytesAsync(path, ct), doc.ContentType, doc.OriginalFileName);
+    }
+
+    // ---------------------------------------------------------------- delete
+
+    public async Task DeleteAsync(
+        Guid claimId, Guid documentId, string callerUserId, string callerRole, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.AsNoTracking().FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+
+        var doc = await _db.ClaimDocuments.FirstOrDefaultAsync(d => d.Id == documentId && d.ClaimId == claimId, ct)
+            ?? throw new EntityNotFoundException("Document not found.");
+
+        if (!string.Equals(callerRole, "Admin", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.Equals(callerRole, "Company", StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedRoleException("Only the owning company or an Admin can remove a document.");
+            var companyId = await ResolveOwnCompanyIdAsync(ct);
+            var ownsPolicy = await _db.Policies.AsNoTracking()
+                .AnyAsync(p => p.Id == claim.PolicyId && p.CompanyProfileId == companyId, ct);
+            if (!ownsPolicy)
+                throw new UnauthorizedRoleException("You can only remove evidence from your own claims.");
+        }
+
+        if (claim.Status != ClaimStatuses.AwaitingSurveyorPickup)
+            throw new ConflictException(
+                $"Evidence is frozen at surveyor pickup (FR5.16) — this claim is {claim.Status}.");
+
+        _db.ClaimDocuments.Remove(doc);
+        await _db.SaveChangesAsync(ct);
+
+        try
+        {
+            var path = Path.Combine(ClaimFolder(claimId), doc.StoredFileName);
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException ex)
+        {
+            // Row is gone; an orphaned file is harmless and will be cleaned by the sweep job.
+            _log.LogWarning(ex, "Could not delete stored file for document {DocumentId}.", documentId);
+        }
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    /// <summary>
+    /// v3.4: the Insurance service does not own company identity. The JWT 'sub' is the
+    /// user id; ownership is resolved through the policy's CompanyProfileId by asking the
+    /// shared HttpContext-backed ICompanyResolver — the same call ClaimService.FileAsync makes.
+    /// </summary>
+    private Task<Guid> ResolveOwnCompanyIdAsync(CancellationToken ct) => _companies.GetCompanyIdAsync(ct);
+
+    private async Task EnsureCanReadAsync(Guid claimId, string callerUserId, string callerRole, CancellationToken ct)
+    {
+        var claim = await _db.Claims.AsNoTracking().FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+
+        switch (callerRole)
+        {
+            case "Admin":
+                return;
+            case "Surveyor":
+                if (!string.Equals(claim.AssignedSurveyorId, callerUserId, StringComparison.Ordinal))
+                    throw new UnauthorizedRoleException("This claim is not assigned to you.");
+                return;
+            case "Company":
+                var companyId = await ResolveOwnCompanyIdAsync(ct);
+                var owns = await _db.Policies.AsNoTracking()
+                    .AnyAsync(p => p.Id == claim.PolicyId && p.CompanyProfileId == companyId, ct);
+                if (!owns) throw new UnauthorizedRoleException("This claim does not belong to you.");
+                return;
+            default:
+                throw new UnauthorizedRoleException("You are not permitted to view this claim's documents.");
+        }
+    }
+
+    private static (string Extension, string ContentType) ? Sniff(byte[] bytes)
+    {
+        foreach (var s in Signatures)
+        {
+            if (bytes.Length < s.Offset + s.Magic.Length) continue;
+            var match = true;
+            for (var i = 0; i < s.Magic.Length; i++)
+                if (bytes[s.Offset + i] != s.Magic[i]) { match = false; break; }
+            if (match) return (s.Extension, s.ContentType);
+        }
+        return null;
+    }
+
+    private static string SanitizeName(string? name, string fallbackExtension)
+    {
+        var cleaned = Path.GetFileName(name ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(cleaned)) return $"document{fallbackExtension}";
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+            cleaned = cleaned.Replace(invalid, '_');
+        return cleaned.Length <= 120 ? cleaned : cleaned[..120];
+    }
+
+    private static ClaimDocumentDto ToDto(ClaimDocument d) => new(
+        d.Id, d.ClaimId, d.DocumentType, d.OriginalFileName, d.ContentType, d.SizeBytes,
+        d.UploadedAtUtc, d.AiStatus, d.AiModel, d.AiReviewedAtUtc);
+}

@@ -1,0 +1,18 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.Application/Dtos/ClaimDocumentDtos.cs
+namespace InsuranceService.Application.Dtos;
+
+/// <summary>
+/// v3.4 — one attached evidence document. Ai* fields are null until the surveyor
+/// runs the audit; the UI shows the "AI check" affordance only while they are null.
+/// </summary>
+public record ClaimDocumentDto(
+    Guid Id,
+    Guid ClaimId,
+    string DocumentType,
+    string OriginalFileName,
+    string ContentType,
+    long SizeBytes,
+    DateTimeOffset UploadedAtUtc,
+    string? AiStatus,
+    string? AiModel,
+    DateTimeOffset? AiReviewedAtUtc);

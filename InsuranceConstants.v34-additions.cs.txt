@@ -1,0 +1,82 @@
+// v3.4 ADDITIONS to src/Services/Insurance/InsuranceService.Domain/Constants/InsuranceConstants.cs
+// Paste these classes at the END of the existing file (it already has the v3.3 constants).
+
+/// <summary>
+/// v3.4 (FR5.1 amended, D8 upload half) — the document types a company can attach at
+/// filing. Deliberately short: the three documents that actually move a decision, plus
+/// a catch-all for photos. Audited with AI: only the money document (repair estimate /
+/// medical bill / rental invoice) — the FIR is prose and produces vague findings.
+/// </summary>
+public static class ClaimDocumentTypes
+{
+    public const string Fir = "FIR";
+    public const string RepairEstimate = "RepairEstimate";
+    public const string MedicalBill = "MedicalBill";
+    public const string RentalInvoice = "RentalInvoice";
+    public const string Other = "Other";
+    public static readonly string[] All = { Fir, RepairEstimate, MedicalBill, RentalInvoice, Other };
+
+    /// <summary>Display labels shared by API and UI.</summary>
+    public static readonly IReadOnlyDictionary<string, string> Labels = new Dictionary<string, string>
+    {
+        [Fir] = "FIR / police report",
+        [RepairEstimate] = "Repair estimate",
+        [MedicalBill] = "Medical bill",
+        [RentalInvoice] = "Rental invoice",
+        [Other] = "Other (photos, etc.)"
+    };
+
+    /// <summary>v3.4 — document types eligible for the AI audit. Everything else is attach-only.</summary>
+    public static readonly string[] Auditable = { RepairEstimate, MedicalBill, RentalInvoice };
+
+    public static bool IsAuditable(string? type) =>
+        type is not null && Auditable.Contains(type);
+
+    /// <summary>Map a claim type to its money document; null when nothing is auditable.</summary>
+    public static string? ExpectedMoneyDocument(string claimType) => claimType switch
+    {
+        InsuranceClaimTypes.OwnVehicleDamage => RepairEstimate,
+        InsuranceClaimTypes.MedicalExpense => MedicalBill,
+        InsuranceClaimTypes.RentalCar => RentalInvoice,
+        _ => null // Third-Party Liability / Uninsured Motorist: no invoice of ours to audit
+    };
+}
+
+/// <summary>v3.4 — AI audit lifecycle per document.</summary>
+public static class AiStatuses
+{
+    public const string Processing = "Processing";
+    public const string Completed = "Completed";
+    public const string Failed = "Failed";           // the model answered but the payload was unusable
+    public const string Unavailable = "Unavailable"; // no provider / network blocked — no checks ran
+    public static readonly string[] All = { Processing, Completed, Failed, Unavailable };
+}
+
+/// <summary>v3.4 — severity of an audit finding. Informational only; nothing auto-rejects.</summary>
+public static class AiFindingSeverities
+{
+    public const string Warn = "Warn";
+    public const string Info = "Info";
+    public static readonly string[] All = { Warn, Info };
+}
+
+/// <summary>
+/// v3.4 — finding codes. Deterministic checks produce these; the model only extracts.
+/// Keep in sync with the frontend's finding renderer and the eval table in the doc.
+/// </summary>
+public static class AiFindingCodes
+{
+    public const string ArithmeticMismatch = "ARITHMETIC_MISMATCH";      // lines/tax don't sum to the stated total
+    public const string DuplicateLine = "DUPLICATE_LINE";                // same description+amount twice
+    public const string VehicleMismatch = "VEHICLE_MISMATCH";            // invoice vehicle != claim vehicle
+    public const string DateOutsideWindow = "DATE_OUTSIDE_WINDOW";       // document date before incident / outside policy
+    public const string ExceedsClaimedAmount = "EXCEEDS_CLAIMED_AMOUNT"; // invoice total > claimed amount
+    public const string NonMedicalItem = "NON_MEDICAL_ITEM";             // towing/repair lines on a hospital bill
+    public const string DescriptionNotInClaim = "DESCRIPTION_NOT_IN_CLAIM"; // item unrelated to the claim type
+    public const string ExtractionIncomplete = "EXTRACTION_INCOMPLETE";  // the document could not be read reliably
+    public static readonly string[] All =
+    {
+        ArithmeticMismatch, DuplicateLine, VehicleMismatch, DateOutsideWindow,
+        ExceedsClaimedAmount, NonMedicalItem, DescriptionNotInClaim, ExtractionIncomplete
+    };
+}

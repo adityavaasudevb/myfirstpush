@@ -1,0 +1,26 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.Application/Interfaces/DocumentContracts.cs
+using InsuranceService.Application.Dtos;
+
+namespace InsuranceService.Application.Interfaces;
+
+/// <summary>
+/// v3.4 (FR5.1 amended) — evidence attachments. Upload/delete are allowed only while the
+/// claim is AwaitingSurveyorPickup; read is allowed to the owning company, the assigned
+/// surveyor, and any admin. Bytes are streamed from local disk, never from user input paths.
+/// </summary>
+public interface IClaimDocumentService
+{
+    Task<ClaimDocumentDto> UploadAsync(
+        Guid claimId, string callerUserId, string documentType,
+        string originalFileName, Stream content, CancellationToken ct = default);
+
+    Task<IReadOnlyList<ClaimDocumentDto>> ListAsync(
+        Guid claimId, string callerUserId, string callerRole, CancellationToken ct = default);
+
+    /// <summary>Returns the bytes plus the stored content type and display name.</summary>
+    Task<(byte[] Bytes, string ContentType, string FileName)> DownloadAsync(
+        Guid claimId, Guid documentId, string callerUserId, string callerRole, CancellationToken ct = default);
+
+    Task DeleteAsync(
+        Guid claimId, Guid documentId, string callerUserId, string callerRole, CancellationToken ct = default);
+}
