@@ -1,0 +1,525 @@
+// PATH ON YOUR MACHINE: src/Services/Insurance/InsuranceService.Infrastructure/Services/ClaimService.cs
+using InsuranceService.Application.Dtos;
+using InsuranceService.Application.Interfaces;
+using InsuranceService.Domain.Constants;
+using InsuranceService.Domain.Entities;
+using InsuranceService.Domain.Services;
+using InsuranceService.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using TNCInsurance.Shared.Exceptions;
+using TNCInsurance.Shared.Models;
+
+namespace InsuranceService.Infrastructure.Services;
+
+/// <summary>
+/// All claim business rules (FR5, FR6). The pure logic — chronology, canonical
+/// structure, plausibility, boundary flag, period derivation, rules-engine
+/// precedence — lives in Domain/Services and is only orchestrated here.
+/// HTTP-mapped exceptions are thrown here, never in Domain.
+/// v3.2 hardening: future-dating blocks (400), canonical trip-log structure (400),
+/// duplicate-claim guard (409), late-intimation flag, paging tiebreakers, release (FR5.18).
+/// v3.2-rebase: company resolution calls GetCompanyIdAsync(ct) — matches YOUR parameterless
+/// ICompanyResolver (the resolver reads the caller from the HttpContext itself).
+/// </summary>
+public class ClaimService : IClaimService
+{
+    private readonly InsuranceDbContext _db;
+    private readonly ICompanyResolver _companies;
+    private readonly IConfiguration _config;
+
+    public ClaimService(InsuranceDbContext db, ICompanyResolver companies, IConfiguration config)
+    {
+        _db = db;
+        _companies = companies;
+        _config = config;
+    }
+
+    /// <summary>FR5.6 — boundary flag window, minutes (default 2, configurable).</summary>
+    private int BoundaryFlagMinutes => _config.GetValue("Claims:BoundaryFlagMinutes", 2);
+    /// <summary>v3.2 — filing later than this many days after the incident flags the claim for mandatory review (default 7).</summary>
+    private int LateIntimationWindowDays => _config.GetValue("Claims:LateIntimationWindowDays", 7);
+    /// <summary>v3.2 — a second non-rejected claim on the same policy with an incident within ±this many hours is refused as a duplicate (default 2).</summary>
+    private int DuplicateClaimWindowHours => _config.GetValue("Claims:DuplicateClaimWindowHours", 2);
+    /// <summary>v3.2 — intake sanity cap on the claimed amount (default Rs 2,00,00,000 — twice the maximum payout).</summary>
+    private decimal MaxClaimAmountInr => _config.GetValue("Claims:MaxClaimAmountInr", 20_000_000m);
+    /// <summary>v3.2 — small clock-skew allowance when rejecting future-dated input.</summary>
+    private static readonly TimeSpan FutureTolerance = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// FR5.1–FR5.8, FR5.16 — intake: ownership + Active/term gate (rules precedence #1),
+    /// event validation, period derivation, flags, rules engine. Submitted and
+    /// AwaitingSurveyorPickup both happen in this one request (Section 2 state machine).
+    /// </summary>
+    public async Task<CreateClaimResponse> FileAsync(string callerUserId, CreateClaimRequest request, CancellationToken ct = default)
+    {
+        var companyId = await _companies.GetCompanyIdAsync(ct);
+
+        var policy = await _db.Policies.AsNoTracking().FirstOrDefaultAsync(p => p.Id == request.PolicyId, ct)
+            ?? throw new EntityNotFoundException("Policy not found.");
+        if (policy.CompanyProfileId != companyId)
+            throw new UnauthorizedRoleException("You do not own this policy.");
+
+        // Rules precedence #1 enforced at intake (FR5.8)
+        if (policy.EffectiveStatus != PolicyStatuses.Active)
+            throw new PolicyStateException($"Claims can only be filed against an Active policy — {policy.PolicyNumber} is {policy.EffectiveStatus}.");
+        if (request.IncidentAtUtc < policy.StartDateUtc!.Value || request.IncidentAtUtc > policy.EndDateUtc!.Value)
+            throw new PolicyStateException("Incident date falls outside the policy term — the claim is rejected at intake.");
+
+        var now = DateTimeOffset.UtcNow;
+        ValidateIntake(request);
+
+        // v3.2 — nothing in the future can already have happened (400, input validity)
+        if (request.IncidentAtUtc > now + FutureTolerance)
+            throw new ValidationException("Incident date/time cannot be in the future.");
+        if (request.ClaimedAmountInr > MaxClaimAmountInr)
+            throw new ValidationException($"ClaimedAmountInr cannot exceed {MaxClaimAmountInr:n0} INR (intake sanity cap; the maximum payout is 1,00,00,000 INR).");
+
+        var claimType = InsuranceClaimTypes.Normalize(request.ClaimType)
+            ?? throw new ValidationException($"Invalid claim type. Valid types: {string.Join(", ", InsuranceClaimTypes.All)}.");
+
+        // v3.2 — duplicate-claim guard: same policy, non-rejected, incident within ± the configured window (409)
+        var dupWindow = TimeSpan.FromHours(DuplicateClaimWindowHours);
+        var dupFrom = request.IncidentAtUtc - dupWindow;
+        var dupTo = request.IncidentAtUtc + dupWindow;
+        var duplicateNumber = await _db.Claims.AsNoTracking()
+            .Where(c => c.PolicyId == policy.Id && c.Status != ClaimStatuses.Rejected &&
+                        c.IncidentAtUtc >= dupFrom && c.IncidentAtUtc <= dupTo)
+            .Select(c => c.ClaimNumber)
+            .FirstOrDefaultAsync(ct);
+        if (duplicateNumber is not null)
+            throw new ConflictException(
+                $"A claim for an incident within +/-{DuplicateClaimWindowHours} hours already exists on this policy ({duplicateNumber}). " +
+                "Duplicate filings for one incident are refused at intake.");
+
+        // ---- event log (FR5.2/FR5.3) ----
+        string derivedPeriod;
+        TripEventRules.FlagEvaluation flags;
+        List<TripEvent> tripEvents;
+        if (request.AppNotInUseDeclared)
+        {
+            // FR5.2 — declared app-off: no event validation; classify App Off; events not persisted.
+            derivedPeriod = CoveragePeriods.AppOff;
+            flags = new TripEventRules.FlagEvaluation(false, null);
+            tripEvents = new List<TripEvent>();
+        }
+        else
+        {
+            tripEvents = (request.TripEvents ?? new List<TripEventInput>()).Select(e =>
+            {
+                var eventType = TripEventTypes.All.FirstOrDefault(t => string.Equals(t, e.EventType, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new ValidationException($"Unknown trip event '{e.EventType}'. Valid events: {string.Join(", ", TripEventTypes.All)}.");
+                if (e.OccurredAtUtc > now + FutureTolerance) // v3.2
+                    throw new ValidationException($"Trip event '{eventType}' is dated in the future — it cannot have happened yet.");
+                return new TripEvent { Id = Guid.NewGuid(), EventType = eventType, OccurredAtUtc = e.OccurredAtUtc };
+            }).ToList();
+
+            // v3.2 (FR5.2) — complete canonical structure first, then chronology (FR5.3)
+            var structureError = TripEventRules.CanonicalSequenceError(tripEvents);
+            if (structureError is not null)
+                throw new ValidationException(structureError);
+            if (!TripEventRules.IsChronological(tripEvents))
+                throw new InvalidEventSequenceException("Trip events are out of chronological order.");
+
+            derivedPeriod = CoveragePeriodDeriver.DerivePeriod(tripEvents, request.IncidentAtUtc);      // FR5.5
+            flags = TripEventRules.Evaluate(tripEvents, request.IncidentAtUtc, BoundaryFlagMinutes,     // FR5.4/FR5.6 + v3.2 log-window checks
+                policy.StartDateUtc!.Value, policy.EndDateUtc!.Value);
+        }
+
+        // v3.2 — late intimation flag (applies to App Off claims too): filed long after the incident
+        var flagReasons = new List<string>();
+        if (flags.Reason is not null) flagReasons.Add(flags.Reason);
+        if (now - request.IncidentAtUtc > TimeSpan.FromDays(LateIntimationWindowDays))
+            flagReasons.Add($"Filed more than {LateIntimationWindowDays} days after the incident (late intimation)");
+
+        // ---- rules engine (FR5.7; precedence #2-#5) ----
+        var preliminary = ClaimRulesEngine.Evaluate(policy.Tier, derivedPeriod, claimType, policy.AddOns, request.ClaimedAmountInr);
+
+        var claim = new Claim
+        {
+            Id = Guid.NewGuid(),
+            ClaimNumber = $"CLM-{now:yyyy}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}",
+            PolicyId = policy.Id,
+            DriverName = request.DriverName.Trim(),
+            DriverLicenceNumber = request.DriverLicenceNumber.Trim(),
+            PassengerName = request.PassengerName.Trim(),
+            PassengerContact = request.PassengerContact.Trim(),
+            PassengerCount = request.PassengerCount,
+            AdditionalPassengersNotes = string.IsNullOrWhiteSpace(request.AdditionalPassengersNotes) ? null : request.AdditionalPassengersNotes.Trim(),
+            VehicleNumber = request.VehicleNumber.Trim(),
+            IncidentAtUtc = request.IncidentAtUtc,
+            IncidentLocation = request.IncidentLocation.Trim(),
+            Description = request.Description.Trim(),
+            ClaimedAmountInr = request.ClaimedAmountInr,
+            ClaimType = claimType,
+            DocumentLink = request.DocumentLink?.Trim() ?? string.Empty,
+            AppNotInUseDeclared = request.AppNotInUseDeclared,
+            DerivedPeriod = derivedPeriod,
+            PreliminaryDecision = preliminary.Decision,
+            PreliminaryAmountInr = preliminary.PreliminaryAmountInr,
+            // Flagged/FlagReason carry only SIGNALS (trip-log plausibility/boundary + late intimation,
+            // FR5.4/FR5.6 + v3.2). The preliminary reject reason is deterministic from
+            // derivedPeriod+tier and intentionally not persisted (Section 5 lists no such column).
+            IsFlagged = flagReasons.Count > 0,
+            FlagReason = flagReasons.Count > 0 ? string.Join("; ", flagReasons) : null,
+            Status = ClaimStatuses.AwaitingSurveyorPickup, // Submitted is implied and left in the same request (Section 2)
+            CreatedAtUtc = now
+        };
+
+        foreach (var e in tripEvents) e.ClaimId = claim.Id;
+        var history = new List<ClaimStatusHistory>
+        {
+            new() { Id = Guid.NewGuid(), ClaimId = claim.Id, FromStatus = null, ToStatus = ClaimStatuses.Submitted, ChangedAtUtc = now, ChangedByUserId = callerUserId },
+            new() { Id = Guid.NewGuid(), ClaimId = claim.Id, FromStatus = ClaimStatuses.Submitted, ToStatus = ClaimStatuses.AwaitingSurveyorPickup, ChangedAtUtc = now, ChangedByUserId = callerUserId }
+        };
+
+        _db.Claims.Add(claim);
+        _db.TripEvents.AddRange(tripEvents);
+        _db.ClaimStatusHistories.AddRange(history);
+        await _db.SaveChangesAsync(ct); // one transaction: claim + events + history (FR5.16 immutability starts here)
+
+        return new CreateClaimResponse(claim.Id, claim.ClaimNumber, claim.Status, claim.DerivedPeriod,
+            claim.PreliminaryDecision, claim.PreliminaryAmountInr, claim.IsFlagged, claim.FlagReason);
+    }
+
+    /// <summary>
+    /// FR5.9/FR9.3 (v3.2 order) — open queue, unassigned claims only. Default order:
+    /// FLAGGED first (mandatory review deserves attention), then OLDEST incident first
+    /// (fair FIFO triage), with an Id tiebreaker for deterministic paging.
+    /// </summary>
+    public async Task<PagedResult<ClaimQueueItemDto>> GetQueueAsync(bool? isFlagged,
+        DateTimeOffset? incidentFrom, DateTimeOffset? incidentTo, int page, int pageSize, CancellationToken ct = default)
+    {
+        var query = _db.Claims.AsNoTracking().Where(c => c.Status == ClaimStatuses.AwaitingSurveyorPickup);
+        if (isFlagged is not null) query = query.Where(c => c.IsFlagged == isFlagged.Value);
+        if (incidentFrom is not null) query = query.Where(c => c.IncidentAtUtc >= incidentFrom.Value);
+        if (incidentTo is not null) query = query.Where(c => c.IncidentAtUtc <= incidentTo.Value);
+        return await PageQueueAsync(
+            query.OrderByDescending(c => c.IsFlagged).ThenBy(c => c.IncidentAtUtc).ThenBy(c => c.Id), page, pageSize, ct);
+    }
+
+    /// <summary>FR9.3 (v3.2 order) — the caller's assigned claims, oldest incident first (stalest work on top), Id tiebreaker.</summary>
+    public async Task<PagedResult<ClaimQueueItemDto>> GetAssignedAsync(string surveyorUserId, int page, int pageSize, CancellationToken ct = default)
+    {
+        var query = _db.Claims.AsNoTracking().Where(c => c.AssignedSurveyorId == surveyorUserId);
+        return await PageQueueAsync(query.OrderBy(c => c.IncidentAtUtc).ThenBy(c => c.Id), page, pageSize, ct);
+    }
+
+    /// <summary>
+    /// FR5.9 — atomic pickup: existence check, then ONE conditional UPDATE that
+    /// succeeds only while the status is still AwaitingSurveyorPickup.
+    /// Missing -> 404; lost the race -> ClaimAlreadyAssignedException (409).
+    /// On success the four Pending field-verification records are created (FR5.10).
+    /// </summary>
+    public async Task PickupAsync(Guid claimId, string surveyorUserId, CancellationToken ct = default)
+    {
+        if (!await _db.Claims.AnyAsync(c => c.Id == claimId, ct))
+            throw new EntityNotFoundException("Claim not found.");
+
+        var updated = await _db.Claims
+            .Where(c => c.Id == claimId && c.Status == ClaimStatuses.AwaitingSurveyorPickup)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, ClaimStatuses.UnderInvestigation)
+                .SetProperty(c => c.AssignedSurveyorId, surveyorUserId), ct);
+        if (updated == 0)
+            throw new ClaimAlreadyAssignedException("This claim was just picked up by another surveyor.");
+
+        _db.FieldVerifications.AddRange(VerificationFields.All.Select(f => new FieldVerification
+        { Id = Guid.NewGuid(), ClaimId = claimId, FieldName = f, Status = VerificationStatuses.Pending }));
+        _db.ClaimStatusHistories.Add(new ClaimStatusHistory
+        { Id = Guid.NewGuid(), ClaimId = claimId, FromStatus = ClaimStatuses.AwaitingSurveyorPickup, ToStatus = ClaimStatuses.UnderInvestigation, ChangedAtUtc = DateTimeOffset.UtcNow, ChangedByUserId = surveyorUserId });
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// FR5.18 (v3.2) — the assigned surveyor releases the claim back to the open queue
+    /// (e.g. they cannot proceed, or picked it up by mistake). Only while
+    /// UnderInvestigation: once the report is submitted the assignment is final.
+    /// Partial field verifications are discarded — the next pickup recreates all
+    /// four in Pending state (FR5.10), so released work always restarts cleanly.
+    /// </summary>
+    public async Task ReleaseAsync(Guid claimId, string surveyorUserId, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+        EnsureAssigned(claim, surveyorUserId);
+        if (claim.Status != ClaimStatuses.UnderInvestigation)
+            throw new ConflictException($"Only a claim UnderInvestigation can be released (current: {claim.Status}). Once the report is submitted, the assignment is final.");
+
+        var fields = await _db.FieldVerifications.Where(f => f.ClaimId == claim.Id).ToListAsync(ct);
+        _db.FieldVerifications.RemoveRange(fields);
+
+        claim.AssignedSurveyorId = null;
+        claim.Status = ClaimStatuses.AwaitingSurveyorPickup;
+        _db.ClaimStatusHistories.Add(new ClaimStatusHistory
+        { Id = Guid.NewGuid(), ClaimId = claim.Id, FromStatus = ClaimStatuses.UnderInvestigation, ToStatus = ClaimStatuses.AwaitingSurveyorPickup, ChangedAtUtc = DateTimeOffset.UtcNow, ChangedByUserId = surveyorUserId });
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>FR5.10/FR5.11 — the assigned surveyor marks one field Verified or Suspicious, with an optional note.</summary>
+    public async Task VerifyFieldAsync(Guid claimId, string surveyorUserId, VerifyFieldRequest request, CancellationToken ct = default)
+    {
+        var claim = await LoadAssignedUnderInvestigationAsync(claimId, surveyorUserId, ct);
+
+        var fieldName = VerificationFields.All.FirstOrDefault(f => string.Equals(f, request.FieldName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new ValidationException($"FieldName must be one of: {string.Join(", ", VerificationFields.All)}.");
+        if (request.Status != VerificationStatuses.Verified && request.Status != VerificationStatuses.Suspicious)
+            throw new ValidationException("Status must be Verified or Suspicious.");
+
+        var field = await _db.FieldVerifications.FirstOrDefaultAsync(f => f.ClaimId == claim.Id && f.FieldName == fieldName, ct)
+            ?? throw new EntityNotFoundException("Field-verification record not found.");
+        field.Status = request.Status;
+        field.Note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim();
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// FR5.13 — final report: 409 while any field is Pending (ConflictException,
+    /// exception table), 409 on a second report (also enforced by the unique index).
+    /// Suspicious field verdicts are surfaced in the notes as negative signals (FR5.11).
+    /// </summary>
+    public async Task SubmitReportAsync(Guid claimId, string surveyorUserId, SubmitReportRequest request, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims
+            .Include(c => c.FieldVerifications)
+            .FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+        EnsureAssigned(claim, surveyorUserId);
+        if (claim.Status != ClaimStatuses.UnderInvestigation)
+            throw new ConflictException($"A report can only be submitted while the claim is UnderInvestigation (current: {claim.Status}).");
+        if (claim.FieldVerifications.Any(f => f.Status == VerificationStatuses.Pending))
+            throw new ConflictException("All four fields must be verified (Verified or Suspicious) before the report can be submitted.");
+        if (await _db.SurveyorReports.AnyAsync(r => r.ClaimId == claim.Id, ct))
+            throw new ConflictException("A report already exists for this claim — only one report per claim.");
+
+        var outcome = string.Equals(request.OverallOutcome, SurveyorOutcomes.Genuine, StringComparison.OrdinalIgnoreCase)
+            ? SurveyorOutcomes.Genuine
+            : string.Equals(request.OverallOutcome, SurveyorOutcomes.Suspicious, StringComparison.OrdinalIgnoreCase)
+                ? SurveyorOutcomes.Suspicious
+                : throw new ValidationException("OverallOutcome must be Genuine or Suspicious.");
+        var recommendation = string.Equals(request.Recommendation, SurveyorRecommendations.Approve, StringComparison.OrdinalIgnoreCase)
+            ? SurveyorRecommendations.Approve
+            : string.Equals(request.Recommendation, SurveyorRecommendations.Reject, StringComparison.OrdinalIgnoreCase)
+                ? SurveyorRecommendations.Reject
+                : throw new ValidationException("Recommendation must be Approve or Reject.");
+        if (recommendation == SurveyorRecommendations.Approve &&
+            (request.RecommendedAmountInr is null or <= 0))
+            throw new ValidationException("RecommendedAmountInr is required and must be greater than zero for an Approve recommendation.");
+
+        var notes = request.Notes?.Trim() ?? string.Empty;
+        var suspicious = claim.FieldVerifications.Where(f => f.Status == VerificationStatuses.Suspicious).Select(f => f.FieldName).ToList();
+        if (suspicious.Count > 0)
+            notes = (notes.Length > 0 ? notes + " " : "") + $"(Negative signal — suspicious fields: {string.Join(", ", suspicious)}.)"; // FR5.11
+
+        _db.SurveyorReports.Add(new SurveyorReport
+        {
+            Id = Guid.NewGuid(), ClaimId = claim.Id, OverallOutcome = outcome, Recommendation = recommendation,
+            RecommendedAmountInr = recommendation == SurveyorRecommendations.Reject ? null : request.RecommendedAmountInr,
+            Notes = notes, SubmittedAtUtc = DateTimeOffset.UtcNow
+        });
+        claim.Status = ClaimStatuses.SurveyorReportSubmitted;
+        _db.ClaimStatusHistories.Add(new ClaimStatusHistory
+        { Id = Guid.NewGuid(), ClaimId = claim.Id, FromStatus = ClaimStatuses.UnderInvestigation, ToStatus = ClaimStatuses.SurveyorReportSubmitted, ChangedAtUtc = DateTimeOffset.UtcNow, ChangedByUserId = surveyorUserId });
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>FR5.14 — admin review screen: preliminary determination + the surveyor's full report.</summary>
+    public async Task<ClaimReviewDto> GetReviewAsync(Guid claimId, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.AsNoTracking()
+            .Include(c => c.FieldVerifications)
+            .Include(c => c.Report)
+            .FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+        if (claim.Report is null)
+            throw new EntityNotFoundException("No surveyor report has been submitted for this claim yet.");
+
+        return new ClaimReviewDto(claim.Id, claim.ClaimNumber, claim.VehicleNumber, claim.ClaimType,
+            claim.ClaimedAmountInr, claim.DerivedPeriod, claim.PreliminaryDecision, claim.PreliminaryAmountInr,
+            claim.IsFlagged, claim.FlagReason, claim.PassengerCount, claim.AdditionalPassengersNotes,
+            claim.FieldVerifications.OrderBy(f => f.FieldName).Select(f => new FieldVerificationDto(f.Id, f.FieldName, f.Status, f.Note)).ToList(),
+            ToReportDto(claim.Report));
+    }
+
+    /// <summary>
+    /// FR5.15 + FR6.1 — admin decision: override note mandatory when differing from
+    /// the surveyor (400); on Approve the payout is simulated in the same request
+    /// (claim becomes Paid, final amount recorded — defaults to the recommended amount).
+    /// </summary>
+    public async Task<ClaimDecisionResponse> DecideAsync(Guid claimId, string adminUserId, ClaimDecisionRequest request, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.Include(c => c.Report).FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+        if (claim.Status != ClaimStatuses.SurveyorReportSubmitted)
+            throw new ConflictException($"A decision can only be made after the surveyor's report is submitted (current: {claim.Status}).");
+
+        var decision = string.Equals(request.Decision, PreliminaryDecisions.Approve, StringComparison.OrdinalIgnoreCase)
+            ? PreliminaryDecisions.Approve
+            : string.Equals(request.Decision, PreliminaryDecisions.Reject, StringComparison.OrdinalIgnoreCase)
+                ? PreliminaryDecisions.Reject
+                : throw new ValidationException("Decision must be Approve or Reject.");
+
+        if (decision != claim.Report!.Recommendation && string.IsNullOrWhiteSpace(request.OverrideNote))
+            throw new ValidationException("An override note is mandatory: your decision differs from the surveyor's recommendation."); // FR5.15
+
+        decimal? finalAmount = null;
+        if (decision == PreliminaryDecisions.Approve)
+        {
+            finalAmount = request.FinalAmountInr ?? claim.Report!.RecommendedAmountInr;
+            if (finalAmount is null or <= 0)
+                throw new ValidationException("FinalAmountInr is required — the surveyor did not recommend a payout amount.");
+        }
+
+        claim.Status = decision == PreliminaryDecisions.Approve ? ClaimStatuses.Paid : ClaimStatuses.Rejected;
+        claim.FinalPayoutAmountInr = finalAmount;
+        _db.ClaimStatusHistories.Add(new ClaimStatusHistory
+        { Id = Guid.NewGuid(), ClaimId = claim.Id, FromStatus = ClaimStatuses.SurveyorReportSubmitted, ToStatus = claim.Status, ChangedAtUtc = DateTimeOffset.UtcNow, ChangedByUserId = adminUserId });
+        await _db.SaveChangesAsync(ct);
+
+        return new ClaimDecisionResponse(claim.Id, claim.ClaimNumber, claim.Status, claim.FinalPayoutAmountInr);
+    }
+
+    /// <summary>FR5.17 — full claim incl. status history and per-field notes. Company (own) / Admin / Surveyor (assigned — backs the investigation screen).</summary>
+    public async Task<ClaimDetailsDto> GetDetailsAsync(Guid claimId, string callerUserId, string callerRole, CancellationToken ct = default)
+    {
+        var claim = await _db.Claims.AsNoTracking()
+            .Include(c => c.Policy)
+            .Include(c => c.TripEvents)
+            .Include(c => c.FieldVerifications)
+            .Include(c => c.Report)
+            .Include(c => c.StatusHistory)
+            .FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+
+        switch (callerRole)
+        {
+            case "Admin":
+                break;
+            case "Surveyor":
+                EnsureAssigned(claim, callerUserId);
+                break;
+            default: // Company — ownership via the parent policy (Section 4)
+                var companyId = await _companies.GetCompanyIdAsync(ct);
+                if (claim.Policy!.CompanyProfileId != companyId)
+                    throw new UnauthorizedRoleException("You do not own this claim.");
+                break;
+        }
+
+        return new ClaimDetailsDto(
+            claim.Id, claim.ClaimNumber, claim.PolicyId, claim.Policy!.PolicyNumber,
+            claim.DriverName, claim.DriverLicenceNumber, claim.VehicleNumber,
+            claim.PassengerName, claim.PassengerContact, claim.PassengerCount, claim.AdditionalPassengersNotes,
+            claim.IncidentAtUtc, claim.IncidentLocation, claim.Description,
+            claim.ClaimedAmountInr, claim.ClaimType, claim.DocumentLink, claim.AppNotInUseDeclared,
+            claim.DerivedPeriod, claim.PreliminaryDecision, claim.PreliminaryAmountInr,
+            claim.IsFlagged, claim.FlagReason, claim.Status, claim.AssignedSurveyorId,
+            claim.FinalPayoutAmountInr, claim.CreatedAtUtc,
+            claim.TripEvents.OrderBy(e => e.OccurredAtUtc).Select(e => new TripEventDto(e.Id, e.EventType, e.OccurredAtUtc)).ToList(),
+            claim.FieldVerifications.OrderBy(f => f.FieldName).Select(f => new FieldVerificationDto(f.Id, f.FieldName, f.Status, f.Note)).ToList(),
+            claim.Report is null ? null : ToReportDto(claim.Report),
+            claim.StatusHistory.OrderBy(h => h.ChangedAtUtc).Select(h => new ClaimStatusHistoryItemDto(h.FromStatus, h.ToStatus, h.ChangedAtUtc, h.ChangedByUserId)).ToList());
+    }
+
+    /// <summary>FR9.4 — company's own claims: status + incident-date filters, paged; newest incident first (Id tiebreaker).</summary>
+    public async Task<PagedResult<ClaimListItemDto>> GetCompanyListAsync(string callerUserId, string? status,
+        DateTimeOffset? from, DateTimeOffset? to, int page, int pageSize, CancellationToken ct = default)
+    {
+        var companyId = await _companies.GetCompanyIdAsync(ct);
+        var query = _db.Claims.AsNoTracking().Include(c => c.Policy)
+            .Where(c => c.Policy!.CompanyProfileId == companyId);
+        if (!string.IsNullOrWhiteSpace(status)) query = query.Where(c => c.Status == status.Trim());
+        if (from is not null) query = query.Where(c => c.IncidentAtUtc >= from.Value);
+        if (to is not null) query = query.Where(c => c.IncidentAtUtc <= to.Value);
+        return await PageListAsync(query.OrderByDescending(c => c.IncidentAtUtc).ThenByDescending(c => c.Id), page, pageSize, ct);
+    }
+
+    /// <summary>FR9.2 — admin claims list: search claim number/vehicle, status/claimType/flagged filters, sort by incident date (Id tiebreaker).</summary>
+    public async Task<PagedResult<ClaimListItemDto>> GetAdminListAsync(string? search, string? status,
+        string? claimType, bool? isFlagged, string? sortOrder, int page, int pageSize, CancellationToken ct = default)
+    {
+        var query = _db.Claims.AsNoTracking().AsQueryable();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var term = search.Trim();
+            query = query.Where(c => c.ClaimNumber.Contains(term) || c.VehicleNumber.Contains(term));
+        }
+        if (!string.IsNullOrWhiteSpace(status)) query = query.Where(c => c.Status == status.Trim());
+        if (!string.IsNullOrWhiteSpace(claimType))
+        {
+            var canonical = InsuranceClaimTypes.Normalize(claimType)
+                ?? throw new ValidationException($"Invalid claimType filter. Valid types: {string.Join(", ", InsuranceClaimTypes.All)}.");
+            query = query.Where(c => c.ClaimType == canonical);
+        }
+        if (isFlagged is not null) query = query.Where(c => c.IsFlagged == isFlagged.Value);
+        var ordered = string.Equals(sortOrder, "asc", StringComparison.OrdinalIgnoreCase)
+            ? query.OrderBy(c => c.IncidentAtUtc).ThenBy(c => c.Id)
+            : query.OrderByDescending(c => c.IncidentAtUtc).ThenByDescending(c => c.Id);
+        return await PageListAsync(ordered, page, pageSize, ct);
+    }
+
+    // ---- helpers ----
+
+    private async Task<Claim> LoadAssignedUnderInvestigationAsync(Guid claimId, string surveyorUserId, CancellationToken ct)
+    {
+        var claim = await _db.Claims.FirstOrDefaultAsync(c => c.Id == claimId, ct)
+            ?? throw new EntityNotFoundException("Claim not found.");
+        EnsureAssigned(claim, surveyorUserId);
+        if (claim.Status != ClaimStatuses.UnderInvestigation)
+            throw new ConflictException($"Fields can only be verified while the claim is UnderInvestigation (current: {claim.Status}).");
+        return claim;
+    }
+
+    private static void EnsureAssigned(Claim claim, string surveyorUserId)
+    {
+        if (!string.Equals(claim.AssignedSurveyorId, surveyorUserId, StringComparison.Ordinal))
+            throw new UnauthorizedRoleException("This claim is not assigned to you.");
+    }
+
+    private static void ValidateIntake(CreateClaimRequest r)
+    {
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(r.DriverName)) missing.Add("driverName");
+        if (string.IsNullOrWhiteSpace(r.DriverLicenceNumber)) missing.Add("driverLicenceNumber");
+        if (string.IsNullOrWhiteSpace(r.VehicleNumber)) missing.Add("vehicleNumber");
+        if (string.IsNullOrWhiteSpace(r.PassengerName)) missing.Add("passengerName");
+        if (string.IsNullOrWhiteSpace(r.PassengerContact)) missing.Add("passengerContact");
+        if (string.IsNullOrWhiteSpace(r.IncidentLocation)) missing.Add("incidentLocation");
+        if (string.IsNullOrWhiteSpace(r.Description)) missing.Add("description");
+        // v3.4 — evidence arrives as uploaded files (FR5.1 amended); the link is legacy and optional.
+        if (missing.Count > 0)
+            throw new ValidationException($"Missing required fields: {string.Join(", ", missing)}.");
+        if (r.ClaimedAmountInr <= 0)
+            throw new ValidationException("ClaimedAmountInr must be greater than zero.");
+        // v3.2 — optional multi-passenger data
+        if (r.PassengerCount is < 1)
+            throw new ValidationException("PassengerCount must be at least 1 when provided.");
+        if (r.AdditionalPassengersNotes?.Length > 500)
+            throw new ValidationException("AdditionalPassengersNotes cannot exceed 500 characters.");
+    }
+
+    private static async Task<PagedResult<ClaimQueueItemDto>> PageQueueAsync(IOrderedQueryable<Claim> ordered, int page, int pageSize, CancellationToken ct)
+    {
+        (page, pageSize) = Pagination.Clamp(page, pageSize);
+        var total = await ordered.CountAsync(ct);
+        var items = await ordered.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return new PagedResult<ClaimQueueItemDto>(items.Select(ToQueueItem).ToList(), page, pageSize, total);
+    }
+
+    private static async Task<PagedResult<ClaimListItemDto>> PageListAsync(IOrderedQueryable<Claim> ordered, int page, int pageSize, CancellationToken ct)
+    {
+        (page, pageSize) = Pagination.Clamp(page, pageSize);
+        var total = await ordered.CountAsync(ct);
+        var items = await ordered.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return new PagedResult<ClaimListItemDto>(items.Select(ToListItem).ToList(), page, pageSize, total);
+    }
+
+    private static ClaimQueueItemDto ToQueueItem(Claim c) => new(
+        c.Id, c.ClaimNumber, c.VehicleNumber, c.ClaimType, c.ClaimedAmountInr, c.IncidentAtUtc,
+        c.IncidentLocation, c.DerivedPeriod, c.PreliminaryDecision, c.IsFlagged, c.FlagReason, c.Status, c.CreatedAtUtc);
+
+    private static ClaimListItemDto ToListItem(Claim c) => new(
+        c.Id, c.ClaimNumber, c.VehicleNumber, c.ClaimType, c.IncidentAtUtc, c.ClaimedAmountInr,
+        c.Status, c.IsFlagged, c.FinalPayoutAmountInr);
+
+    private static SurveyorReportDto ToReportDto(SurveyorReport r) => new(
+        r.Id, r.OverallOutcome, r.Recommendation, r.RecommendedAmountInr, r.Notes, r.SubmittedAtUtc);
+}
