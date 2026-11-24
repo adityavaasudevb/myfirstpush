@@ -1,0 +1,432 @@
+// PATH ON YOUR MACHINE: src/InsuranceService/InsuranceService.Infrastructure/Ai/ClaimAuditService.cs
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
+using InsuranceService.Application.Ai;
+using InsuranceService.Application.Interfaces;
+using InsuranceService.Domain.Constants;
+using InsuranceService.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using TNCInsurance.Shared.Exceptions;
+namespace InsuranceService.Infrastructure.Ai;
+/// <summary>
+/// v3.4 — orchestrates the audit for one claim.
+///
+/// Pipeline, in order:
+/// 1. authorize (company owns the policy / surveyor assigned / admin)
+/// 2. claim must be AwaitingSurveyorPickup or UnderInvestigation (evidence exists, decision not made)
+/// 3. claim amount must clear Ai:AuditThresholdInr
+/// 4. for each document: hash -> cache lookup -> (miss) one extraction call
+/// 5. CheckEngine.Evaluate — deterministic, no model
+/// 6. one summary call (optional; skipped when the provider is offline)
+/// 7. persist AiStatus/AiModel/AiFindingsJson per document + the claim-level JSON
+///
+/// Cost control, all three layers:
+/// * hash cache — the same bytes are never sent twice, even on another claim
+/// * caps — Ai:MaxCallsPerClaim (6) and Ai:MaxCallsPerDay (50), counted before each call
+/// * opt-in — nothing runs until a surveyor presses the button
+/// </summary>
+public sealed class ClaimAuditService : IClaimAuditService
+{
+private readonly InsuranceDbContext _db;
+private readonly IAiProvider _ai;
+private readonly ICompanyResolver _companies;
+private readonly IConfiguration _config;
+private readonly ILogger<ClaimAuditService> _log;
+private int MaxCallsPerClaim => _config.GetValue("Ai:MaxCallsPerClaim", 6);
+private int MaxCallsPerDay => _config.GetValue("Ai:MaxCallsPerDay", 50);
+private decimal AuditThresholdInr => _config.GetValue("Ai:AuditThresholdInr", 10_000m);
+private decimal InputPricePerMillion => _config.GetValue("Ai:InputPricePerMillionInr", 65m);
+private decimal OutputPricePerMillion => _config.GetValue("Ai:OutputPricePerMillionInr", 330m);
+public ClaimAuditService(InsuranceDbContext db, IAiProvider ai, ICompanyResolver companies,
+IConfiguration config, ILogger<ClaimAuditService> log)
+{
+_db = db; _ai = ai; _companies = companies; _config = config; _log = log;
+}
+// =====================================================================
+public async Task<ClaimAuditResult> AuditAsync(
+Guid claimId, string callerUserId, string callerRole, bool force = false, CancellationToken ct = default)
+{
+var sw = Stopwatch.StartNew();
+var claim = await LoadAuthorisedAsync(claimId, callerUserId, callerRole, ct);
+if (claim.Status is not (ClaimStatuses.AwaitingSurveyorPickup or ClaimStatuses.UnderInvestigation))
+throw new ConflictException(
+$"The integrity check runs on a claim before it is decided — this claim is {claim.Status}.");
+if (claim.ClaimedAmountInr < AuditThresholdInr)
+throw new ValidationException(
+$"Claims under {AuditThresholdInr:n0} INR are reviewed without an automated check.");
+var documents = await _db.ClaimDocuments.AsNoTracking()
+.Where(d => d.ClaimId == claimId)
+.OrderBy(d => d.UploadedAtUtc)
+.ToListAsync(ct);
+if (documents.Count == 0)
+throw new ConflictException("This claim has no attached evidence, so there is nothing to check.");
+
+// v3.4 — a claim may be re-read a bounded number of times. Without this, release-and-repick
+// is a free reset: every pickup lets the button fire again and six calls go out each time.
+// The count survives release because it is read from the stored artefacts, which the release
+// path deliberately keeps.
+var runsSoFar = await CountRunsAsync(claimId, ct);
+if (!force && runsSoFar >= SurveyorLimits.MaxAuditRuns)
+throw new ConflictException(
+$"This claim has already been checked {runsSoFar} time(s) — the limit is {SurveyorLimits.MaxAuditRuns}. " +
+"New evidence is not possible on this claim (it is frozen from the first pickup), so a third reading would return the same answer.");
+// ---- cache: unchanged documents + a stored run means no spend --------------
+if (!force && documents.All(d => d.AiStatus == AiStatuses.Completed) &&
+documents.All(d => d.AiFindingsJson is not null))
+{
+var stored = await ReadStoredAsync(claimId, ct);
+if (stored is not null) return stored;
+}
+// ---- caps ----------------------------------------------------------------
+var callsToday = await CountCallsTodayAsync(ct);
+var planned = documents.Count + 1; // + the summary call
+if (planned > MaxCallsPerClaim)
+throw new ValidationException(
+$"This claim needs {planned} model calls but the per-claim cap is {MaxCallsPerClaim}. " +
+"Split the evidence or raise Ai:MaxCallsPerClaim deliberately.");
+if (callsToday + planned > MaxCallsPerDay)
+throw new ConflictException(
+$"Daily model-call cap reached ({callsToday}/{MaxCallsPerDay}). Raise Ai:MaxCallsPerDay or continue tomorrow.");
+// ---- extraction, one call per document, hash-cached -----------------------
+var context = AuditPrompts.ClaimContext(claim.ClaimNumber, claim.ClaimType, claim.VehicleNumber,
+claim.DriverName, claim.IncidentAtUtc, claim.ClaimedAmountInr);
+var results = new List<DocumentAudit>();
+long promptTokens = 0, outputTokens = 0;
+var callsMade = 0;
+foreach (var doc in documents)
+{
+var audit = new DocumentAudit
+{
+DocumentId = doc.Id,
+DocumentType = doc.DocumentType,
+FileName = doc.OriginalFileName
+};
+if (!_ai.IsAvailable)
+{
+audit.Status = AiStatuses.Unavailable;
+audit.ErrorMessage = "No model is configured (Ai:Provider = inprocess).";
+results.Add(audit);
+continue;
+}
+var bytes = await ReadStoredFileAsync(claimId, doc.StoredFileName, ct);
+if (bytes is null)
+{
+audit.Status = AiStatuses.Failed;
+audit.ErrorMessage = "The stored file is missing from disk.";
+results.Add(audit);
+continue;
+}
+// The same document attached to two claims is one read, not two — unless the caller
+// pressed "run it again", which exists precisely to re-read.
+var cached = force ? null : await FindCachedExtractionAsync(doc.Id, doc.Sha256, ct);
+if (cached is not null)
+{
+audit.Status = AiStatuses.Completed;
+audit.Extracted = cached;
+results.Add(audit);
+continue;
+}
+// A model reply that parses is not the same as a reply that read the document.
+// Retry once, in-run, before giving up: a hollow read is a sampling accident, not a
+// document defect, and it must never be cached as a successful read.
+AiCallResult<ExtractedDocument> call;
+var attempts = 0;
+do
+{
+attempts++;
+callsMade++;
+call = await _ai.ExtractDocumentAsync(
+doc.OriginalFileName, doc.ContentType, bytes, doc.DocumentType, context, ct);
+promptTokens += call.PromptTokens;
+outputTokens += call.OutputTokens;
+if (!call.Succeeded) _log.LogWarning("Attempt {N} for {File} failed: {Error}", attempts, doc.OriginalFileName, call.Error);
+}
+while (attempts < 2 && callsMade < MaxCallsPerClaim && !Plausible(call, doc.DocumentType));
+if (call.Succeeded)
+{
+audit.Status = AiStatuses.Completed;
+audit.Extracted = call.Value;
+// A failed read is a finding, not an exception — but it must be visible.
+if (call.Value!.Confidence == "low")
+_log.LogWarning("Low-confidence extraction for {File} on {Claim}.", doc.OriginalFileName, claim.ClaimNumber);
+}
+else
+{
+audit.Status = AiStatuses.Failed;
+audit.ErrorMessage = call.Error ?? "the model returned no usable reading after two attempts";
+}
+results.Add(audit);
+}
+// ---- judge ---------------------------------------------------------------
+var input = new ClaimAuditInput
+{
+ClaimId = claim.Id,
+ClaimNumber = claim.ClaimNumber,
+ClaimType = claim.ClaimType,
+VehicleNumber = claim.VehicleNumber,
+DriverName = claim.DriverName,
+PassengerName = claim.PassengerName,
+IncidentAtUtc = claim.IncidentAtUtc,
+ClaimedAmountInr = claim.ClaimedAmountInr,
+Documents = results
+};
+var result = CheckEngine.Evaluate(input);
+// A run that read nothing cannot certify anything. Completeness may have produced warnings;
+// if it did not, the only honest verdict is NeedsReview, never Consistent.
+if (result.Documents.Count > 0 && result.Documents.All(d => d.Extracted is null)
+&& result.Verdict == AuditVerdicts.Consistent)
+{
+result.Verdict = AuditVerdicts.NeedsReview;
+}
+result.Documents = results;
+// CheckEngine returns findings flat; the evidence panel wants them per document.
+foreach (var doc in results)
+doc.Findings.AddRange(result.Findings.Where(f => f.DocumentId == doc.DocumentId));
+// ---- one narrative call, only when it can add something -------------------
+if (_ai.IsAvailable && callsMade < MaxCallsPerClaim && result.Findings.Count > 0)
+{
+callsMade++;
+var summaryCall = await _ai.SummariseAsync(BuildFactsJson(input, result), ct);
+promptTokens += summaryCall.PromptTokens;
+outputTokens += summaryCall.OutputTokens;
+result.Summary = summaryCall.Succeeded ? summaryCall.Value! : FallbackSummary(result);
+}
+else
+{
+result.Summary = FallbackSummary(result);
+}
+result.Model = _ai.IsAvailable ? _ai.ModelId : null;
+result.Offline = !_ai.IsAvailable;
+result.ModelCallsMade = callsMade;
+result.PromptTokens = promptTokens;
+result.OutputTokens = outputTokens;
+result.EstimatedCostInr = EstimateCost(promptTokens, outputTokens);
+result.DurationMs = sw.ElapsedMilliseconds;
+// An offline run is not a result — it is the absence of one. Persisting it would give the
+// claim a stored "Consistent" that nobody ever actually checked. GET then keeps returning
+// 204, and the panel keeps saying "Not checked", which is the truth.
+if (!result.Offline)
+await PersistAsync(claim.Id, result, ct);
+_log.LogInformation(
+"Audit of {Claim}: {Verdict} — {Findings} findings, {Calls} model calls, {Cost} INR, {Ms} ms.",
+claim.ClaimNumber, result.Verdict, result.Findings.Count, callsMade, result.EstimatedCostInr, result.DurationMs);
+return result;
+}
+// =====================================================================
+public async Task<ClaimAuditResult?> GetStoredAsync(
+Guid claimId, string callerUserId, string callerRole, CancellationToken ct = default)
+{
+await LoadAuthorisedAsync(claimId, callerUserId, callerRole, ct);
+return await ReadStoredAsync(claimId, ct);
+}
+// =====================================================================
+// Persistence
+// =====================================================================
+private async Task PersistAsync(Guid claimId, ClaimAuditResult result, CancellationToken ct)
+{
+var docs = await _db.ClaimDocuments.Where(d => d.ClaimId == claimId).ToListAsync(ct);
+var byId = result.Documents.ToDictionary(d => d.DocumentId);
+// One blob per document, and it is the claim-level result. The detail screen reads any row
+// and gets the whole verdict; the per-document findings travel inside it. Duplication is
+// the price of not adding a table, and it is noted in README-V34-B.md rather than hidden.
+var claimJson = JsonSerializer.Serialize(result, JsonOpts);
+foreach (var doc in docs)
+{
+if (!byId.TryGetValue(doc.Id, out var audit)) continue;
+// A read that failed must never overwrite a read that worked. The old row stays exactly
+// as it was — Completed, with its extraction — and the failure is reported to whoever
+// pressed the button. A reviewer needs last week's reading more than a row that says
+// "offline".
+if (audit.Status is AiStatuses.Failed && doc.AiFindingsJson is not null)
+{
+_log.LogWarning("Keeping the previous extraction for document {DocumentId}: {Error}",
+doc.Id, audit.ErrorMessage);
+continue;
+}
+doc.AiStatus = audit.Status;
+doc.AiModel = result.Model;
+doc.AiReviewedAtUtc = result.GeneratedAtUtc;
+doc.AiFindingsJson = claimJson;
+}
+await _db.SaveChangesAsync(ct);
+}
+private async Task<ClaimAuditResult?> ReadStoredAsync(Guid claimId, CancellationToken ct)
+{
+var json = await _db.ClaimDocuments.AsNoTracking()
+.Where(d => d.ClaimId == claimId && d.AiFindingsJson != null)
+.OrderByDescending(d => d.AiReviewedAtUtc)
+.Select(d => d.AiFindingsJson)
+.FirstOrDefaultAsync(ct);
+if (json is null) return null;
+try { return JsonSerializer.Deserialize<ClaimAuditResult>(json, JsonOpts); }
+catch (JsonException) { return null; }
+}
+/// <summary>
+/// v3.4 — how many completed runs exist for this claim. Counted from distinct stored blobs,
+/// because PersistAsync writes the same claim-level JSON onto every document row.
+/// </summary>
+private async Task<int> CountRunsAsync(Guid claimId, CancellationToken ct)
+{
+var jsons = await _db.ClaimDocuments.AsNoTracking()
+.Where(d => d.ClaimId == claimId && d.AiFindingsJson != null)
+.Select(d => d.AiFindingsJson!)
+.Distinct()
+.ToListAsync(ct);
+var runs = 0;
+foreach (var json in jsons)
+{
+try
+{
+using var doc = JsonDocument.Parse(json);
+if (doc.RootElement.TryGetProperty("generatedAtUtc", out _)) runs++;
+}
+catch (JsonException) { /* an unreadable blob is not a run */ }
+}
+return runs;
+}
+
+/// <summary>Counts today's calls from the stored artefacts — no new table, no migration.</summary>
+private async Task<int> CountCallsTodayAsync(CancellationToken ct)
+{
+var since = new DateTimeOffset(DateTimeOffset.UtcNow.UtcDateTime.Date, TimeSpan.Zero);
+var jsons = await _db.ClaimDocuments.AsNoTracking()
+.Where(d => d.AiReviewedAtUtc >= since && d.AiFindingsJson != null)
+.Select(d => d.AiFindingsJson!)
+.Distinct()
+.ToListAsync(ct);
+var total = 0;
+foreach (var json in jsons)
+{
+try
+{
+using var doc = JsonDocument.Parse(json);
+if (doc.RootElement.TryGetProperty("modelCallsMade", out var calls))
+total += calls.GetInt32();
+}
+catch (JsonException) { /* an unreadable artefact must not stop an audit */ }
+}
+return total;
+}
+/// <summary>
+/// Did this reply actually read the document? A money document with no line items and no
+/// total is not a reading, however clean the JSON looks. Nothing else is judged here — the
+/// deterministic checks own everything a surveyor would dispute.
+/// </summary>
+private static bool Plausible(AiCallResult<ExtractedDocument> call, string documentType)
+{
+if (!call.Succeeded) return false;
+var d = call.Value!;
+if (documentType is ClaimDocumentTypes.RepairEstimate
+or ClaimDocumentTypes.MedicalBill
+or ClaimDocumentTypes.RentalInvoice)
+{
+var readsMoney = d.GrandTotal is not null || d.LineItems is { Count: > 0 };
+var readsIdentity = d.IssuerName is not null || d.DocumentDate is not null;
+return readsMoney && readsIdentity;
+}
+return true;
+}
+private async Task<ExtractedDocument?> FindCachedExtractionAsync(
+Guid documentId, string sha256, CancellationToken ct)
+{
+if (string.IsNullOrWhiteSpace(sha256)) return null;
+var json = await _db.ClaimDocuments.AsNoTracking()
+.Where(d => d.Sha256 == sha256 && d.AiStatus == AiStatuses.Completed && d.AiFindingsJson != null)
+.Select(d => d.AiFindingsJson)
+.FirstOrDefaultAsync(ct);
+if (json is null) return null;
+try
+{
+using var doc = JsonDocument.Parse(json);
+if (!doc.RootElement.TryGetProperty("documents", out var docs)) return null;
+foreach (var d in docs.EnumerateArray())
+{
+// The blob holds the whole claim. Only accept the extraction that belongs to the
+// document we asked about — otherwise a hash hit returns a sibling's reading.
+if (!d.TryGetProperty("documentId", out var idEl)
+|| !Guid.TryParse(idEl.GetString(), out var id)
+|| id != documentId) continue;
+if (!d.TryGetProperty("extracted", out var ex) || ex.ValueKind == JsonValueKind.Null) continue;
+return ex.Deserialize<ExtractedDocument>(JsonOpts);
+}
+}
+catch (JsonException) { }
+return null;
+}
+// =====================================================================
+// Helpers
+// =====================================================================
+private async Task<Domain.Entities.Claim> LoadAuthorisedAsync(
+Guid claimId, string callerUserId, string callerRole, CancellationToken ct)
+{
+var claim = await _db.Claims.AsNoTracking().FirstOrDefaultAsync(c => c.Id == claimId, ct)
+?? throw new EntityNotFoundException("Claim not found.");
+switch (callerRole)
+{
+case "Admin":
+return claim;
+case "Surveyor":
+if (!string.Equals(claim.AssignedSurveyorId, callerUserId, StringComparison.Ordinal))
+throw new UnauthorizedRoleException("This claim is not assigned to you.");
+return claim;
+case "Company":
+var companyId = await _companies.GetCompanyIdAsync(ct);
+var owns = await _db.Policies.AsNoTracking()
+.AnyAsync(p => p.Id == claim.PolicyId && p.CompanyProfileId == companyId, ct);
+return owns ? claim : throw new UnauthorizedRoleException("This claim does not belong to you.");
+default:
+throw new UnauthorizedRoleException("You are not permitted to audit this claim.");
+}
+}
+private async Task<byte[]?> ReadStoredFileAsync(Guid claimId, string storedName, CancellationToken ct)
+{
+var root = _config["DocumentStorage:RootPath"];
+var basePath = string.IsNullOrWhiteSpace(root)
+? Path.Combine(AppContext.BaseDirectory, "uploads")
+: (Path.IsPathRooted(root) ? root : Path.Combine(AppContext.BaseDirectory, root));
+var folder = Path.Combine(basePath, claimId.ToString("N"));
+var path = Path.GetFullPath(Path.Combine(folder, storedName));
+if (!path.StartsWith(Path.GetFullPath(folder), StringComparison.Ordinal)) return null;
+if (!File.Exists(path)) return null;
+return await File.ReadAllBytesAsync(path, ct);
+}
+private decimal EstimateCost(long promptTokens, long outputTokens) =>
+Math.Round(promptTokens / 1_000_000m * InputPricePerMillion
++ outputTokens / 1_000_000m * OutputPricePerMillion, 4);
+private static string BuildFactsJson(ClaimAuditInput input, ClaimAuditResult result) =>
+JsonSerializer.Serialize(new
+{
+claim = input.ClaimNumber,
+vehicle = input.VehicleNumber,
+claimedAmountInr = input.ClaimedAmountInr,
+docCount = input.Documents.Count,
+verdict = result.Verdict,
+findings = result.Findings.Select(f => new { f.Code, f.Severity, f.Message })
+}, JsonOpts);
+/// <summary>What the summary says when no model ran. Never empty: the UI always has a sentence.</summary>
+private static string FallbackSummary(ClaimAuditResult result)
+{
+var warns = result.Findings.Count(f => f.Severity == AiFindingSeverities.Warn);
+// Nothing was read: "every document reconciles" would be a claim about documents this run
+// never opened.
+if (result.Documents.Count > 0 && result.Documents.All(d => d.Extracted is null))
+return warns > 0
+? $"No document could be read; {warns} issue(s) were found from the attached set alone."
+: "No document could be read, so nothing was compared. This is not a clean result.";
+return warns switch
+{
+0 => "Every document reconciles with the claim and with each other.",
+1 => "The documents mostly reconcile; one point needs a look before a decision.",
+_ => $"{warns} points in the paperwork do not reconcile with the claim."
+};
+}
+private static readonly JsonSerializerOptions JsonOpts = new()
+{
+PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+PropertyNameCaseInsensitive = true,
+DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+};
+}
